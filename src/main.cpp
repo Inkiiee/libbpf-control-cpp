@@ -2,11 +2,12 @@
 #include <string>
 
 #include "bpf_map_control.h"
+#include "utils/logger.hpp"
 
 bool show_log_if_not_no_error(bpf_control::BpfControlErrorCode error_code){
     if(error_code != bpf_control::BpfControlErrorCode::kNoError){
         std::string error_message = std::string(bpf_control::bpf_control_error_string(error_code));
-        bpf_control::log(error_message);
+        utils::log(error_message);
         return true;
     }
     return false;

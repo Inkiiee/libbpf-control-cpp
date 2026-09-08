@@ -20,6 +20,7 @@ set(SRCS
     src/bpf_map_control.cpp
     src/bpf_ring_buffer_control.cpp
     src/bpf_perf_buffer_control.cpp
+    src/nic_check/interface_loader.cpp
 )
 
 add_executable(bpf_control ${SRCS})
@@ -58,3 +59,5 @@ if(SDKTARGETSYSROOT)
         ${SDKTARGETSYSROOT}/usr/lib
     )
 endif()
+
+add_subdirectory(tc_bpf)

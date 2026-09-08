@@ -16,6 +16,12 @@ namespace bpf_control{
         using ring_buffer_sample_callback = ring_buffer_sample_fn;
         using ring_buffer_ptr = std::unique_ptr<struct ring_buffer, decltype(&ring_buffer__free)>;
 
+        BpfRingBufferControl() = delete;
+        BpfRingBufferControl(const BpfRingBufferControl&) = delete;
+        BpfRingBufferControl& operator=(const BpfRingBufferControl&) = delete;
+
+        BpfRingBufferControl(BpfRingBufferControl&&) = default;
+        BpfRingBufferControl& operator=(BpfRingBufferControl&&) = default;
         BpfRingBufferControl(const std::string& name, std::size_t buf_size=1024*64u, void* ctx=nullptr);
 
         // 기본적으로 bpf map과는 open과정이 조금 다름.

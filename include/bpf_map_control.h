@@ -13,6 +13,12 @@ Class Name   : bpf_map_control.h
 namespace bpf_control{
     class BpfMapControl : public BpfBase {
     public:
+        BpfMapControl() = delete;
+        BpfMapControl(const BpfMapControl&) = delete;
+        BpfMapControl& operator=(const BpfMapControl&) = delete;
+        
+        BpfMapControl(BpfMapControl&&) = default;
+        BpfMapControl& operator=(BpfMapControl&&) = default;
         BpfMapControl(const std::string& name, std::size_t key_sz, std::size_t value_sz, std::size_t max_ent, bpf_map_type map_type = BPF_MAP_TYPE_HASH);
 
         virtual BpfControlErrorCode open(bool is_pinned = false, const std::string& pin_path = "") override;

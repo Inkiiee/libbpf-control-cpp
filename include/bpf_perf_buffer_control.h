@@ -19,6 +19,12 @@ namespace bpf_control{
         using perf_buffer_lost_callback = perf_buffer_lost_fn;
         using perf_buffer_ptr = std::unique_ptr<struct perf_buffer, decltype(&perf_buffer__free)>;  
 
+        BpfPerfBufferControl() = delete;
+        BpfPerfBufferControl(const BpfPerfBufferControl&) = delete;
+        BpfPerfBufferControl& operator=(const BpfPerfBufferControl&) = delete;
+
+        BpfPerfBufferControl(BpfPerfBufferControl&&) = default;
+        BpfPerfBufferControl& operator=(BpfPerfBufferControl&&) = default;
         BpfPerfBufferControl(const std::string& name, int page_count=8, void* ctx=nullptr);
 
         // 기본적으로 bpf map과는 open과정이 조금 다름.

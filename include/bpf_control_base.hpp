@@ -23,11 +23,7 @@ Class Name   : bpf_control_base.hpp
 #include <bpf/libbpf.h>
 #include <linux/bpf.h>
 
-namespace {
-    // 디버그 모드 설정(true시에 로그 출력이 디버그 형태로 출력됨. false시에 로그 출력이 일반 형태로 출력됨)
-    // 디버그 형식이란 로그 출력시 함수명, 파일명, 라인번호가 함께 출력되는 형태를 의미함.
-    constexpr bool kDebugMode = true;
-}
+#include "utils/logger.hpp"
 
 namespace bpf_control {
     enum class BpfControlErrorCode : std::uint32_t {
@@ -109,32 +105,24 @@ namespace bpf_control {
         }
     }
 
-    inline std::string_view short_function_name(const char* function_name) noexcept {
-        std::string_view name = function_name == nullptr ? std::string_view{} : function_name;
-        if(const auto parameters = name.find('('); parameters != std::string_view::npos)
-            name = name.substr(0, parameters);
-        return name;
-    }
-
-    inline void log(
-        std::string_view message,
-        std::source_location location = std::source_location::current()) noexcept 
-    {
-        if constexpr (kDebugMode) {
-            try{
-                std::filesystem::path file_path(location.file_name());
-                auto file_name = file_path.filename().string();
-                std::cerr << "[DEBUG] " << file_name << ":" << location.line() << " (" << short_function_name(location.function_name()) << ") - " << message << std::endl;
-            } catch (const std::exception& e) {
-                std::cerr << "[DEBUG] " << location.file_name() << ":" << location.line() << " (" << short_function_name(location.function_name()) << ") - " << message << std::endl;
-            }
-        } else {
-            std::cerr << message << std::endl;
-        }
-    }
-
     class BpfBase{
     public:
+        BpfBase() = delete;
+        BpfBase(const BpfBase&) = delete;
+        BpfBase& operator=(const BpfBase&) = delete;
+
+        BpfBase(BpfBase&& other) noexcept
+            : fd_(std::exchange(other.fd_, -1)), name_(std::move(other.name_)), pin_path_(std::move(other.pin_path_)) {}
+        BpfBase& operator=(BpfBase&& other) noexcept {
+            if (this != &other) {
+                if (is_open()) close();
+                fd_ = std::exchange(other.fd_, -1);
+                name_ = std::move(other.name_);
+                pin_path_ = std::move(other.pin_path_);
+            }
+            return *this;
+        }
+
         BpfBase(const std::string& n, const std::string& p) : fd_(-1), name_(n), pin_path_(p) {}
         virtual ~BpfBase(){ if(is_open()) close(); }
 
@@ -147,7 +135,7 @@ namespace bpf_control {
                 return BpfControlErrorCode::kAlreadyPinnedError;
 
             if(ec) {
-                log("Error checking pin path existence: " + ec.message());
+                utils::log("Error checking pin path existence: " + ec.message());
                 return BpfControlErrorCode::kPinningError;
             }
 
@@ -173,7 +161,7 @@ namespace bpf_control {
             if(std::filesystem::exists(pin_path_, ec)){
                 std::filesystem::remove(pin_path_, ec);
                 if(ec){
-                    log("Error unpinning map: " + ec.message());
+                    utils::log("Error unpinning map: " + ec.message());
                     return BpfControlErrorCode::kUnpinningError; // Failed to unpin the map
                 }
 
@@ -182,7 +170,7 @@ namespace bpf_control {
             }
 
             if(ec){
-                log("Error checking pin path existence: " + ec.message());
+                utils::log("Error checking pin path existence: " + ec.message());
                 pin_path_.clear(); // Clear the pin path
                 return BpfControlErrorCode::kUnpinningError; // Error checking pin path existence
             }
