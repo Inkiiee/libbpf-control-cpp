@@ -2,41 +2,34 @@
 #include <string>
 
 #include "bpf_map_control.h"
+#include "bpf_ring_buffer_control.h"
+#include "utils/bpf_prog_loader.h"
 #include "utils/logger.hpp"
 
-bool show_log_if_not_no_error(bpf_control::BpfControlErrorCode error_code){
-    if(error_code != bpf_control::BpfControlErrorCode::kNoError){
-        std::string error_message = std::string(bpf_control::bpf_control_error_string(error_code));
-        utils::log(error_message);
-        return true;
-    }
-    return false;
-}
+#include "tc_bpf/tc_comm.h"
+
+using namespace std;
+using namespace utils;
+using namespace bpf_control;
 
 int main(){
-    // BPF map control 객체 생성
-    bpf_control::BpfMapControl map_control("my_map", sizeof(int), sizeof(int), 1024);
-    auto error = map_control.open(); // BPF map 열기
-    if(show_log_if_not_no_error(error)) return -1;
+    BpfMapControl mirror_map("mirror_map", sizeof(mirror_key), sizeof(mirror_value), MIRRORING_MAX_INSTANCES);
+    BpfMapControl monitor_map("monitor_map", sizeof(monitor_key), sizeof(monitor_value), MONITORING_MAX_INSTANCES);
+    BpfRingBufferControl monitor_ringbuf("monitor_ringbuf", MONITOR_RINGBUF_SIZE);
 
-    for(std::size_t i=0; i < map_control.get_max_entries(); ++i){
-        int key = i;
-        int value = i * 10;
-        error = map_control.update(&key, &value); // BPF map에 값 업데이트
-        if(show_log_if_not_no_error(error)) return -1;
-    }
+    mirror_map.open();
+    monitor_map.open();
+    monitor_ringbuf.open();
 
-    for(std::size_t i=0; i < map_control.get_max_entries(); ++i){
-        int key = i;
-        int value;
-        error = map_control.lookup(&key, &value); // BPF map에서 값 조회
-        if(show_log_if_not_no_error(error)) return -1;
-        
-        std::cout << "Key: " << key << ", Value: " << value << std::endl;
-    }
+    mirror_map.pin("/sys/fs/bpf/mirror_map");
+    monitor_map.pin("/sys/fs/bpf/monitor_map");
+    monitor_ringbuf.pin("/sys/fs/bpf/monitor_ringbuf");
 
-    error = map_control.close(); // BPF map 닫기
-    if(show_log_if_not_no_error(error)) return -1;
+    BpfProgLoader loader("/home/root/tc_mirroring.o");
+    std::vector<string> pinned {"mirror_map", "monitor_map", "monitor_ringbuf"};
+    loader.load_prog(tc_mirroring, pinned);
+
+    for(;;){}
 
     return 0;
 }

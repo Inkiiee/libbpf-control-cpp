@@ -15,12 +15,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 project(bpf_control C CXX)
 
+# std::jthread / std::stop_token 은 pthread 를 요구한다.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 set(SRCS
     src/main.cpp
     src/bpf_map_control.cpp
     src/bpf_ring_buffer_control.cpp
     src/bpf_perf_buffer_control.cpp
     src/nic_check/interface_loader.cpp
+    src/utils/safe_command.cpp
 )
 
 add_executable(bpf_control ${SRCS})
@@ -49,6 +54,7 @@ target_compile_definitions(bpf_control PRIVATE
 
 target_link_libraries(bpf_control PRIVATE
     bpf
+    Threads::Threads
 )
 
 if(SDKTARGETSYSROOT)
