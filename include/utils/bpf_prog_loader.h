@@ -30,6 +30,8 @@ namespace utils{
         kQdiscFailedError,
         kBpfAttachError,
         kProgGetFdError,
+        kBpfDetachError,
+        kInterfaceMonitorFailed
     };
 
     class BpfProgLoader{
@@ -39,7 +41,7 @@ namespace utils{
         BpfProgLoader& operator=(const BpfProgLoader&) = delete;
         BpfProgLoader& operator=(BpfProgLoader&&) = delete;
 
-        BpfProgLoader(const std::string& prog_path);
+        BpfProgLoader(const std::string& prog_path, int handle = 1, int priority = 100, bool is_ingress = true);
         ~BpfProgLoader();
 
         BpfProgLoaderError load_prog(const std::string& function_name, const std::vector<std::string>& pinned_map_names);
@@ -47,6 +49,9 @@ namespace utils{
         std::string prog_obj_path_;
         std::string pinned_prog_path_;
         nic_check::InterfaceLoader loader;
+        int handle_;
+        int priority_;
+        bool is_ingress_;
     };
 }
 

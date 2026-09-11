@@ -1,7 +1,9 @@
+#include "vmlinux.h"
+
 #include "tc_comm.h"
+
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
-#include <string.h>
 
 #ifndef ETH_ALEN
 #define ETH_ALEN 6
@@ -90,24 +92,32 @@ static __always_inline struct iphdr *parse_iphdr(void *ip_start, void *data_end)
     return ip;
 }
 
-char LICENSE[] SEC("license") = "GPL";
-
-SEC("classifier")
-int tc_mirroring(struct __sk_buff *skb) {
+static __always_inline void mirroring(struct __sk_buff *skb){
     __u32 in_ifindex = skb->ifindex;
     struct mirror_value *mirror_val = bpf_map_lookup_elem(&mirror_map, &in_ifindex);
-    if(mirror_val && mirror_val->enabled){
-        if(mirror_val->dst_ifindex_count <= MIRRORING_MAX_INSTANCES){
-            for(__u32 i = 0; i < mirror_val->dst_ifindex_count; i++){
-                __u32 dst_ifindex = mirror_val->dst_ifindexes[i];
-                bpf_clone_redirect(skb, dst_ifindex, 0);
-            }
-        }
+
+    if(!mirror_val || !mirror_val->enabled) return;
+
+    __u32 count = mirror_val->dst_ifindex_count;
+    if(count > MIRRORING_MAX_INSTANCES)
+        return;
+    
+    for(__u32 i = 0; i < MIRRORING_MAX_INSTANCES; i++){
+        if(i >= count) break;
+
+        __u32 dst_ifindex = mirror_val->dst_ifindexes[i];
+        bpf_clone_redirect(skb, dst_ifindex, 0);
     }
+}
+
+char LICENSE[] SEC("license") = "GPL";
+
+SEC("tc")
+int tc_mirroring(struct __sk_buff *skb) {
+    mirroring(skb);
 
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-
     struct ethhdr *eth = parse_ethhdr(data, data_end);
     if(!eth)
         return 0;

@@ -26,6 +26,7 @@ set(SRCS
     src/bpf_perf_buffer_control.cpp
     src/nic_check/interface_loader.cpp
     src/utils/safe_command.cpp
+    src/utils/bpf_prog_loader.cpp
 )
 
 add_executable(bpf_control ${SRCS})

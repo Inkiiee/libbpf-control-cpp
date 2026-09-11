@@ -11,6 +11,7 @@ Class Name   : bpf_prog_loader.cpp
 #include <system_error>
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
@@ -20,6 +21,7 @@ Class Name   : bpf_prog_loader.cpp
 
 using namespace std;
 using namespace utils;
+using namespace nic_check;
 
 namespace fs = std::filesystem;
 
@@ -45,7 +47,7 @@ namespace{
         // .o파일 열기.
         bpf_object* obj = bpf_object__open_file(obj_path.c_str(), nullptr);
         if(!obj){
-            error_code ec1(errno, std::generic_category);
+            error_code ec1(errno, std::generic_category());
             utils::log("bpf_object__open_file error: " + ec1.message());
             return BpfProgLoaderError::kBpfObjectOpenFailed;
         }
@@ -54,7 +56,7 @@ namespace{
         // 프로그램 타입 지정. SEC("classifier") 는 자동 추론이 안 된다.
         bpf_program* prog = bpf_object__find_program_by_name(obj_ptr.get(), function_name.c_str());
         if(!prog){
-            error_code ec2(ENOENT, std::generic_category);
+            error_code ec2(ENOENT, std::generic_category());
             utils::log("bpf_object__find_program_by_name: " + ec2.message());
             return BpfProgLoaderError::kBpfFunctionNameNotFoundError;
         }
@@ -64,7 +66,7 @@ namespace{
         for(const auto& map_name: pinned_map_names){
             bpf_map* map = bpf_object__find_map_by_name(obj_ptr.get(), map_name.c_str());
             if(!map){   //실제 .o에서 해당 맵의 정의가 없음
-                error_code e3(ENOENT, std::generic_category);
+                error_code ec3(ENOENT, std::generic_category());
                 utils::log("bpf_object__find_map_by_name(map name: " + map_name + "): " + ec3.message());
                 return BpfProgLoaderError::kBpfProgDontUseTheMap;
             }
@@ -77,7 +79,7 @@ namespace{
             }
             const int rc = bpf_map__set_pin_path(map, pinned_map_path.c_str());
             if(rc < 0){ // 핀 경로 설정 실패
-                error_code e4(-rc, std::generic_category);
+                error_code ec4(-rc, std::generic_category());
                 utils::log("bpf_map__set_pin_path(map name: " + map_name + "): " + ec4.message());
                 return BpfProgLoaderError::kBpfProgFailedPinnedMapLoad;
             }
@@ -86,7 +88,7 @@ namespace{
         // 로드 — 이 시점에 맵 재사용·검증·프로그램 검증이 모두 일어난다
         int rc = bpf_object__load(obj_ptr.get());
         if(rc < 0){
-            error_code e5(-rc, std::generic_category);
+            error_code ec5(-rc, std::generic_category());
             utils::log("bpf_object__load error: " + ec5.message());
             return BpfProgLoaderError::kVerifierError;
         }
@@ -99,7 +101,7 @@ namespace{
         }
         rc = bpf_program__pin(prog, pinned_prog_path.c_str());
         if(rc < 0){
-            error_code e6(-rc, std::generic_category);
+            error_code ec6(-rc, std::generic_category());
             utils::log("bpf_program__pin: " + ec6.message());
             return BpfProgLoaderError::kBpfProgPinError;
         }
@@ -107,7 +109,28 @@ namespace{
         return BpfProgLoaderError::kNoError;
     }
 
-    BpfProgLoaderError attach_tc_filter(int ifindex, const std::string& path, int priority, bool is_ingress = true){
+    optional<bool> is_applied_tc_filter(int ifindex, int handle, int priority, bool is_ingress = true){
+        struct bpf_tc_hook hook = {};
+        hook.sz           = sizeof(hook);
+        hook.ifindex      = ifindex;
+        hook.attach_point = is_ingress ? BPF_TC_INGRESS : BPF_TC_EGRESS;
+
+        struct bpf_tc_opts query = {};
+        query.sz = sizeof(query);
+        query.handle = handle;
+        query.priority = priority;
+
+        int rc = bpf_tc_query(&hook, &query);
+        if(rc == 0) return true;
+        else if(rc == -ENOENT) return false;
+        return nullopt;
+    }
+
+    BpfProgLoaderError attach_tc_filter(int ifindex, const std::string& path, int handle, int priority, bool is_ingress = true){
+        optional<bool> is_exist_filter = is_applied_tc_filter(ifindex, handle, priority, is_ingress);
+        if(is_exist_filter && *is_exist_filter)
+            return BpfProgLoaderError::kNoError;
+
         struct bpf_tc_hook hook = {};
         hook.sz           = sizeof(hook);
         hook.ifindex      = ifindex;
@@ -115,28 +138,28 @@ namespace{
 
         int rc = bpf_tc_hook_create(&hook);
         if (rc && rc != -EEXIST){
-            error_code ec1(-rc, std::generic_category);
+            error_code ec1(-rc, std::generic_category());
             utils::log("bpf_tc_hook_create error: " + ec1.message());
             return BpfProgLoaderError::kQdiscFailedError;
         }
 
         int prog_fd = bpf_obj_get(path.c_str());
         if(prog_fd < 0){
-            utils::log("bpf_obj_get error: " + path.string());
+            utils::log("bpf_obj_get error: " + path);
             return BpfProgLoaderError::kProgGetFdError;
         }
 
         struct bpf_tc_opts opts = {};
         opts.sz       = sizeof(opts);
         opts.prog_fd  = prog_fd;
-        opts.handle   = 1;
+        opts.handle   = handle;
         opts.priority = priority;
         opts.flags    = BPF_TC_F_REPLACE;
         rc = bpf_tc_attach(&hook, &opts);
 
         if(rc){
             ::close(prog_fd);
-            error_code ec2(-rc, std::generic_category);
+            error_code ec2(-rc, std::generic_category());
             utils::log("bpf_tc_attach error: " + ec2.message());
             return BpfProgLoaderError::kBpfAttachError;
         }
@@ -144,10 +167,43 @@ namespace{
         ::close(prog_fd);
         return BpfProgLoaderError::kNoError;
     }
+
+    BpfProgLoaderError detach_tc_filter(int ifindex, int handle, int priority, bool is_ingress = true){
+        struct bpf_tc_hook hook = {};
+        hook.sz           = sizeof(hook);
+        hook.ifindex      = ifindex;
+        hook.attach_point = is_ingress ? BPF_TC_INGRESS : BPF_TC_EGRESS;
+
+        struct bpf_tc_opts opts = {};
+        opts.sz       = sizeof(opts);
+        opts.handle   = handle;
+        opts.priority = priority;
+        // prog_fd / prog_id / flags 는 0 이어야 한다
+
+        int rc = bpf_tc_detach(&hook, &opts);
+        if(rc == 0 || rc == -ENOENT)     // 없으면 이미 목적 달성
+            return BpfProgLoaderError::kNoError;
+
+        error_code ec(-rc, std::generic_category());
+        utils::log("bpf_tc_detach error: " + ec.message());
+        return BpfProgLoaderError::kBpfDetachError;
+    }
 }
 
-BpfProgLoader::BpfProgLoader(const string& prog_path): prog_obj_path_{prog_path} {}
-BpfProgLoader::~BpfProgLoader(){}
+BpfProgLoader::BpfProgLoader(const string& prog_path, int handle, int priority, bool is_ingress): 
+    prog_obj_path_{prog_path}, handle_{handle}, priority_{priority}, is_ingress_{is_ingress} {}
+BpfProgLoader::~BpfProgLoader(){
+    auto snaps = loader.snapshot();
+    for(const auto& [k, v] : *snaps){
+        BpfProgLoaderError detach_err = detach_tc_filter(v.ifindex, handle_, priority_, is_ingress_);
+        if(detach_err != BpfProgLoaderError::kNoError)
+            utils::log(pinned_prog_path_ + " detach failed from " + k);
+    }
+    if(!pinned_prog_path_.empty()){
+        error_code ignore_ec;
+        fs::remove(pinned_prog_path_, ignore_ec);
+    }
+}
 
 BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const vector<string>& pinned_map_names){
     // 프로그램이 핀이 안되어있다면 핀하기
@@ -161,16 +217,20 @@ BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const v
     auto interface_snapshots = loader.snapshot();
     for(const auto& [k, v]: *interface_snapshots){
         utils::log("attach target: " + k + " <- " + pinned_prog_path_);
-        if(attach_tc_filter(v.ifindex, pinned_prog_path_, 100) != BpfProgLoaderError::kNoError)
+        if(attach_tc_filter(v.ifindex, pinned_prog_path_, handle_, priority_, is_ingress_) == BpfProgLoaderError::kNoError)
             utils::log("Success");
     }
 
-    loader.start_monitor([this](SnapshotPtr snaps){
+    bool is_start = loader.start_monitor([this](InterfaceLoader::SnapshotPtr snaps){
         for(const auto& [k, v]: *snaps){
             utils::log("attach target: " + k + " <- " + pinned_prog_path_);
-            if(attach_tc_filter(v.ifindex, pinned_prog_path_, 100) != BpfProgLoaderError::kNoError)
+            if(attach_tc_filter(v.ifindex, pinned_prog_path_, handle_, priority_, is_ingress_) == BpfProgLoaderError::kNoError)
                 utils::log("Success");
         }
     });
-    return BpfProgLoaderError::kNoError;
+
+    if(is_start)
+        return BpfProgLoaderError::kNoError;
+
+    return BpfProgLoaderError::kInterfaceMonitorFailed;
 }

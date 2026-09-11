@@ -8,11 +8,9 @@ Class Name   : tc_comm.h
 #ifndef TC_COMM_H
 #define TC_COMM_H
 
-#include "vmlinux.h"
-
 #define MIRRORING_MAX_INSTANCES 10
 #define MONITORING_MAX_INSTANCES 10
-#define MONITOR_RINGBUF_SIZE (16*1024*64u) // 16MB ring buffer size
+#define MONITOR_RINGBUF_SIZE (16*1024*1024u) // 16MB ring buffer size
 
 typedef __u32 monitor_key; // 모니터링 맵의 키 타입 (예: ifindex)
 typedef __u32 monitor_value; // 모니터링 맵의 값 타입 (예: 0: 비활성화, 1: 활성화)

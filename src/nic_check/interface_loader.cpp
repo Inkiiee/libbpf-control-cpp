@@ -42,6 +42,10 @@ namespace{
         return std::string(::strerror_r(error_number, buffer, sizeof(buffer)));
     }
 
+    // 주소가 없는 자리(IP 미할당, 브로드캐스트 없는 인터페이스)를 나타낸다.
+    // 변환 실패를 뜻하는 "" 와 구분하기 위한 값이다.
+    constexpr const char* kNoAddress = "N/A";
+
     // netlink 수신 버퍼. 한 번에 여러 메시지가 담겨 온다.
     constexpr std::size_t kNetlinkBufferSize = 8192;
     // 버스트 때 ENOBUFS 로 이벤트를 잃는 빈도를 줄인다.
@@ -59,7 +63,7 @@ namespace nic_check{
     }
 
     string InterfaceLoader::get_ip_string_by_sockaddr_in(const struct sockaddr_in* addr) const {
-        if(!addr) return "";
+        if(!addr || addr->sin_family != AF_INET) return "";
 
         char buf_addr_string[INET_ADDRSTRLEN];
         if(::inet_ntop(AF_INET, &(addr->sin_addr), buf_addr_string, sizeof(buf_addr_string)) == NULL){
@@ -445,30 +449,58 @@ namespace nic_check{
         // 건너뛴 개수는 요약 로그로 드러낸다.
         size_t skipped = 0;
 
+        // getifaddrs 는 인터페이스당 주소 패밀리마다 항목을 하나씩 돌려준다.
+        // eth0 하나에 AF_PACKET(링크) / AF_INET / AF_INET6 항목이 따로 온다.
+        //   - AF_PACKET 항목은 sockaddr_ll 이라 sockaddr_in 으로 읽으면 안 되고,
+        //     ifa_netmask 도 NULL 이다.
+        //   - 어느 패밀리가 먼저 오는지는 보장되지 않는다.
+        // 그래서 "인터페이스 등록"과 "IPv4 주소 채우기"를 분리해, 항목 순서에
+        // 관계없이 같은 결과가 나오게 한다. IP 가 없는 인터페이스도 목록에 남는다.
+        size_t with_ipv4 = 0;
+
         InterfaceMap processed;
         for(struct ifaddrs* ifa = ifaddr_ptr.get(); ifa; ifa = ifa->ifa_next){
             if(ifa->ifa_addr == nullptr) continue;
+            if(ifa->ifa_flags & IFF_LOOPBACK) continue;
+
+            const auto family = ifa->ifa_addr->sa_family;
+            // IPv6 등 나머지 패밀리는 이 클래스가 다루지 않는다.
+            if(family != AF_INET && family != AF_PACKET) continue;
 
             const string ifname = ifa->ifa_name;
-            // 같은 인터페이스의 두 번째 주소는 정상 상황이라 로그를 남기지 않는다.
-            if(processed.contains(ifname)) continue;
 
-            if(ifa->ifa_addr->sa_family != AF_INET || ifa->ifa_flags & IFF_LOOPBACK) continue;
+            // 처음 보는 인터페이스면 패밀리와 무관한 정보(ifindex, MAC)를 먼저 채운다.
+            auto found = processed.find(ifname);
+            if(found == processed.end()){
+                const std::uint32_t ifindex = ::if_nametoindex(ifname.c_str());
+                if(ifindex == 0){
+                    const int error_number = errno;
+                    ++skipped;
+                    utils::log("skip " + ifname + ": if_nametoindex failed: " + errno_message(error_number));
+                    continue;
+                }
 
-            const std::uint32_t ifindex = ::if_nametoindex(ifname.c_str());
-            if(ifindex == 0){
-                const int error_number = errno;
-                ++skipped;
-                utils::log("skip " + ifname + ": if_nametoindex failed: " + errno_message(error_number));
-                continue;
+                auto mac = get_mac_string_by_ifname(ifname);
+                if(mac.empty()){
+                    ++skipped;
+                    utils::log("skip " + ifname + ": mac address unavailable");
+                    continue;
+                }
+
+                InterfaceInfo info;
+                info.name = ifname;
+                info.ifindex = ifindex;
+                info.mac_address = std::move(mac);
+                // IPv4 항목을 만나면 아래에서 덮어쓴다. 못 만나면 그대로 남는다.
+                info.ip_address = kNoAddress;
+                info.netmask = kNoAddress;
+                info.broadcast_address = kNoAddress;
+                found = processed.emplace(ifname, std::move(info)).first;
             }
 
-            auto mac = get_mac_string_by_ifname(ifname);
-            if(mac.empty()){
-                ++skipped;
-                utils::log("skip " + ifname + ": mac address unavailable");
-                continue;
-            }
+            if(family != AF_INET) continue;
+            // 한 인터페이스에 IPv4 가 여러 개면 첫 번째만 쓴다.
+            if(found->second.ip_address != kNoAddress) continue;
 
             auto device_ip = get_ip_string_by_sockaddr_in(reinterpret_cast<const struct sockaddr_in*>(ifa->ifa_addr));
             auto subnet_ip = get_ip_string_by_sockaddr_in(reinterpret_cast<const struct sockaddr_in*>(ifa->ifa_netmask));
@@ -477,25 +509,21 @@ namespace nic_check{
             if(ifa->ifa_flags & IFF_BROADCAST)
                 broadcast_ip = get_ip_string_by_sockaddr_in(reinterpret_cast<const struct sockaddr_in*>(ifa->ifa_broadaddr));
             else
-                broadcast_ip = "N/A";
+                broadcast_ip = kNoAddress;
 
+            // 변환에 실패해도 인터페이스 자체는 목록에 남긴다(IP 만 비는 상태).
             if(device_ip.empty() || subnet_ip.empty() || broadcast_ip.empty()){
-                ++skipped;
-                utils::log("skip " + ifname + ": address conversion failed (ip=" +
+                utils::log("keep " + ifname + " without ipv4: conversion failed (ip=" +
                     (device_ip.empty() ? "fail" : "ok") + " netmask=" +
                     (subnet_ip.empty() ? "fail" : "ok") + " broadcast=" +
                     (broadcast_ip.empty() ? "fail" : "ok") + ")");
                 continue;
             }
 
-            InterfaceInfo info;
-            info.name = ifname;
-            info.ifindex = ifindex;
-            info.mac_address = std::move(mac);
-            info.ip_address = std::move(device_ip);
-            info.broadcast_address = std::move(broadcast_ip);
-            info.netmask = std::move(subnet_ip);
-            processed.emplace(ifname, std::move(info));
+            found->second.ip_address = std::move(device_ip);
+            found->second.netmask = std::move(subnet_ip);
+            found->second.broadcast_address = std::move(broadcast_ip);
+            ++with_ipv4;
         }
 
         const size_t loaded = processed.size();
@@ -509,6 +537,7 @@ namespace nic_check{
         set_last_error(InterfaceError::kNoError);
 
         utils::log("interface list refreshed: loaded=" + std::to_string(loaded) +
+                   " (ipv4=" + std::to_string(with_ipv4) + ")" +
                    " skipped=" + std::to_string(skipped));
 
         out = std::move(next);
