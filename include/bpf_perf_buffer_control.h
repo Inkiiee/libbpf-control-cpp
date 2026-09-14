@@ -1,8 +1,9 @@
 /*
 Class Name   : bpf_perf_buffer_control.h
-@version     : 1.0
+@version     : 1.1
 @author      : Inkiiee
 @modify      : 2026-09-07, 프로그램 작성
+               2026-09-14, pin되어있는 맵을 사용할 때, 정보를 가져오는 load_map_info 함수 추가
 */
 
 #ifndef BPF_PERF_BUFFER_CONTROL_H
@@ -47,6 +48,8 @@ namespace bpf_control{
         perf_buffer_ptr perfbuf_ = {nullptr, &perf_buffer__free}; // perf buffer를 관리하는 unique_ptr. perf_buffer__free를 사용하여 자동으로 해제됨.
         perf_buffer_sample_callback sample_cb_ = nullptr; // 커널에서 이벤트가 발생했을 때 호출되는 콜백함수
         perf_buffer_lost_callback lost_cb_ = nullptr; // 커널에서 이벤트를 놓쳤을 때 호출되는 콜백함수
+
+        bool load_map_info();
     };
 }
 

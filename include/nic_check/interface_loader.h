@@ -1,9 +1,10 @@
 /*
 Class Name   : interface_loader.h
-@version     : 1.1
+@version     : 1.2
 @author      : Inkiiee
 @modify      : 2026-09-08, 프로그램 작성
                2026-09-10, netlink 변경 모니터링 및 스냅샷 조회 추가
+               2026-09-14  데이터 레이스 문제 수정 및 상태 추가
 */
 
 #ifndef INTERFACE_LOADER_H
@@ -151,6 +152,32 @@ namespace nic_check {
         InterfaceError get_last_error() const;
 
     private:
+        enum class MonitorStatus{
+            kStopped = 0,
+            kStopping = 1,
+            kRunning = 2,
+            kStarting = 3
+        };
+
+        SnapshotPtr interfaces_;
+        mutable std::mutex interfaces_mutex_;
+        mutable InterfaceError last_error_;
+        mutable std::mutex last_error_mutex_;
+        std::mutex refresh_mutex_;
+        ChangeHandler on_change_;
+        mutable std::mutex handler_mutex_;
+        mutable std::mutex fd_mutex_;
+
+        std::chrono::milliseconds debounce_;
+        std::atomic<bool> dirty_;
+
+        int sock_;      // MAC 조회용 ioctl 소켓. refresh 안에서만 쓰이고 직렬화되어 있다.
+        int nl_sock_;   // NETLINK_ROUTE 감시 소켓
+        int wake_fd_;   // 감시 루프를 깨우는 eventfd
+
+        std::jthread monitor_thread_;
+        std::atomic<MonitorStatus> monitor_status_{MonitorStatus::kStopped};
+
         // 락을 쥔 채 목록을 새로 읽어 out 에 넣는다. 콜백은 여기서 부르지 않는다.
         void reload_snapshot(SnapshotPtr& out);
         void refresh_interface_list();
@@ -167,26 +194,6 @@ namespace nic_check {
         std::string mac_to_string(const std::uint8_t mac[6]) const ;
         std::string get_ip_string_by_sockaddr_in(const struct sockaddr_in* addr) const ;
         std::string get_mac_string_by_ifname(const std::string& ifname) const ;
-
-        SnapshotPtr interfaces_;
-        mutable std::mutex interfaces_mutex_;
-
-        mutable InterfaceError last_error_;
-        mutable std::mutex last_error_mutex_;
-
-        std::mutex refresh_mutex_;
-
-        ChangeHandler on_change_;
-        mutable std::mutex handler_mutex_;
-
-        std::chrono::milliseconds debounce_;
-        std::atomic<bool> dirty_;
-
-        int sock_;      // MAC 조회용 ioctl 소켓. refresh 안에서만 쓰이고 직렬화되어 있다.
-        int nl_sock_;   // NETLINK_ROUTE 감시 소켓
-        int wake_fd_;   // 감시 루프를 깨우는 eventfd
-
-        std::jthread monitor_thread_;
     };
 }
 

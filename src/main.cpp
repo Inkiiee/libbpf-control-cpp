@@ -38,16 +38,7 @@ string ip_to_string(std::uint32_t ip){
 
 InterfaceLoader in;
 
-/*
-    핀이 이미 있으면 그것을 열고, 없을 때만 새로 만들어 핀한다.
-
-    한쪽만 하면 둘 다 깨진다.
-      - 항상 새로 만들면: BpfBase::pin() 은 핀 파일이 있으면
-        kAlreadyPinnedError 로 실패한다. 그 뒤 load_prog() 는
-        bpf_map__set_pin_path() 로 "핀된 옛 맵"을 재사용하므로, eBPF 프로그램은
-        옛 맵을 보고 여기서는 새 맵에 쓰게 되어 설정이 반영되지 않는다.
-      - 항상 핀만 열면: 핀이 없는 첫 실행에서 맵 자체가 만들어지지 않는다.
-*/
+// 핀이 이미 있으면 그것을 열고, 없을 때만 새로 만들어 핀한다.
 template <class BpfObject>
 bool open_or_create(BpfObject& object, const string& name, const string& pin_path){
     if(object.open(true, pin_path) == BpfControlErrorCode::kNoError){
@@ -159,7 +150,7 @@ int main(){
     set_monitoring_target(monitor_map, "eth3");
 
     BpfProgLoader loader("/home/root/tc_mirroring.o");
-    std::vector<string> pinned {"mirror_map", "monitor_map", "monitor_ringbuf"};
+    std::vector<BpfBase*> pinned {&mirror_map, &monitor_map, &monitor_ringbuf};
     const auto load_error = loader.load_prog("tc_mirroring", pinned);
     if(load_error != BpfProgLoaderError::kNoError){
         utils::log("load_prog failed: code=" +

@@ -1,9 +1,10 @@
 /*
 Class Name   : interface_loader.cpp
-@version     : 1.1
+@version     : 1.2
 @author      : Inkiiee
 @modify      : 2026-09-08, 프로그램 작성
                2026-09-10, netlink 변경 모니터링 및 스냅샷 조회 추가
+               2026-09-14  데이터 레이스 문제 수정 및 상태 추가
 */
 
 #include "nic_check/interface_loader.h"
@@ -175,27 +176,30 @@ namespace nic_check{
     }
 
     bool InterfaceLoader::start_monitor(ChangeHandler on_change){
-        if(monitor_thread_.joinable()){
+        if(monitor_status_.load() != MonitorStatus::kStopped){
             utils::log("monitor is already running");
+            return false;
+        }
+        monitor_status_.store(MonitorStatus::kStarting);
+    
+        wake_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if(wake_fd_ < 0){
+            const int error_number = errno;
+            set_last_error(InterfaceError::kWakeFdError);
+            utils::log("eventfd failed: " + errno_message(error_number));
+            monitor_status_.store(MonitorStatus::kStopped);
+            return false;
+        }
+
+        if(!open_netlink()){
+            close_fd(wake_fd_);
+            monitor_status_.store(MonitorStatus::kStopped);
             return false;
         }
 
         {
             std::lock_guard<std::mutex> lock(handler_mutex_);
             on_change_ = std::move(on_change);
-        }
-
-        wake_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-        if(wake_fd_ < 0){
-            const int error_number = errno;
-            set_last_error(InterfaceError::kWakeFdError);
-            utils::log("eventfd failed: " + errno_message(error_number));
-            return false;
-        }
-
-        if(!open_netlink()){
-            close_fd(wake_fd_);
-            return false;
         }
 
         // 생성자의 refresh 와 감시 시작 사이에 일어난 변경을 놓치지 않도록 한 번 읽는다.
@@ -205,10 +209,16 @@ namespace nic_check{
         monitor_thread_ = std::jthread([this](std::stop_token stop){ monitor_loop(stop); });
         utils::log("interface monitor started(debounce=" +
                    std::to_string(debounce_.count()) + "ms)");
+
+        monitor_status_.store(MonitorStatus::kRunning);
         return true;
     }
 
     void InterfaceLoader::stop_monitor(){
+        if(monitor_status_.load() != MonitorStatus::kRunning)
+            return;
+
+        monitor_status_.store(MonitorStatus::kStopping);
         if(monitor_thread_.joinable()){
             // request_stop 이 stop_callback 을 거쳐 eventfd 를 건드려 poll 을 깨운다.
             monitor_thread_.request_stop();
@@ -217,19 +227,24 @@ namespace nic_check{
         }
 
         close_fd(nl_sock_);
-        close_fd(wake_fd_);
-
+        {
+            lock_guard<mutex> fd_lock(fd_mutex_);
+            close_fd(wake_fd_);
+        }
         {
             std::lock_guard<std::mutex> lock(handler_mutex_);
             on_change_ = nullptr;
         }
+
+        monitor_status_.store(MonitorStatus::kStopped);
     }
 
     bool InterfaceLoader::is_monitoring() const {
-        return monitor_thread_.joinable();
+        return monitor_status_.load() == MonitorStatus::kRunning;
     }
 
     void InterfaceLoader::wake_monitor(){
+        lock_guard<mutex> lock(fd_mutex_);
         if(wake_fd_ < 0) return;
 
         const std::uint64_t one = 1;
@@ -243,19 +258,18 @@ namespace nic_check{
 
     void InterfaceLoader::drain_wake(){
         std::uint64_t value = 0;
-        while(::read(wake_fd_, &value, sizeof(value)) == static_cast<ssize_t>(sizeof(value))){
+        while(::read(wake_fd_, &value, sizeof(value)) == static_cast<ssize_t>(sizeof(value))
+            && monitor_status_.load() == MonitorStatus::kRunning){
             // EFD_NONBLOCK 이라 비면 EAGAIN 으로 빠진다.
         }
     }
 
     void InterfaceLoader::request_refresh(){
-        if(monitor_thread_.joinable()){
+        if(is_monitoring()){
             dirty_.store(true, std::memory_order_release);
             wake_monitor();
             return;
         }
-
-        // 감시 중이 아니면 처리해 줄 워커가 없으므로 호출 스레드에서 바로 읽는다.
         refresh_interface_list();
     }
 
@@ -264,6 +278,8 @@ namespace nic_check{
         char buffer[kNetlinkBufferSize];
 
         for(;;){
+            if(monitor_status_.load() != MonitorStatus::kRunning) break;
+
             struct sockaddr_nl peer;
             std::memset(&peer, 0x00, sizeof(peer));
 
@@ -398,6 +414,9 @@ namespace nic_check{
         ChangeHandler handler;
         {
             std::lock_guard<std::mutex> lock(handler_mutex_);
+            if(monitor_status_.load() != MonitorStatus::kRunning)
+                return;
+
             handler = on_change_;
         }
         if(!handler) return;

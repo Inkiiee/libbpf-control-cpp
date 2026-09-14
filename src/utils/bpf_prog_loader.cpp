@@ -1,12 +1,14 @@
 /*
 Class Name   : bpf_prog_loader.cpp
-@version     : 1.0
+@version     : 1.2
 @author      : Inkiiee
 @modify      : 2026-09-09, 프로그램 작성
+               2026-09-14, pin한 파일에 대한 소유권 명시 및 set_pin_path를 bpf_reuse_fd로 수정
 */
 
 #include "utils/bpf_prog_loader.h"
 #include "utils/logger.hpp"
+#include "bpf_control_base.hpp"
 
 #include <system_error>
 #include <filesystem>
@@ -22,6 +24,7 @@ Class Name   : bpf_prog_loader.cpp
 using namespace std;
 using namespace utils;
 using namespace nic_check;
+using namespace bpf_control;
 
 namespace fs = std::filesystem;
 
@@ -37,76 +40,6 @@ namespace{
             utils::log("file exists check error: " + err_code.message());
 
         return false;
-    }
-
-    BpfProgLoaderError load_and_pin_prog_obj(const string& prog_obj_path, const string& function_name, const vector<string>& pinned_map_names){
-        fs::path obj_path{prog_obj_path};
-        if(!is_exists_file(obj_path))
-            return BpfProgLoaderError::kProgObjectNotExistsError;
-
-        // .o파일 열기.
-        bpf_object* obj = bpf_object__open_file(obj_path.c_str(), nullptr);
-        if(!obj){
-            error_code ec1(errno, std::generic_category());
-            utils::log("bpf_object__open_file error: " + ec1.message());
-            return BpfProgLoaderError::kBpfObjectOpenFailed;
-        }
-        unique_ptr<bpf_object, decltype(&::bpf_object__close)> obj_ptr{obj, &::bpf_object__close};
-
-        // 프로그램 타입 지정. SEC("classifier") 는 자동 추론이 안 된다.
-        bpf_program* prog = bpf_object__find_program_by_name(obj_ptr.get(), function_name.c_str());
-        if(!prog){
-            error_code ec2(ENOENT, std::generic_category());
-            utils::log("bpf_object__find_program_by_name: " + ec2.message());
-            return BpfProgLoaderError::kBpfFunctionNameNotFoundError;
-        }
-        bpf_program__set_type(prog, BPF_PROG_TYPE_SCHED_CLS); // 실제 타입 지정 파트(분류)
-
-        // 만둘어둔 pinned map들을 붙여주는 경로.
-        for(const auto& map_name: pinned_map_names){
-            bpf_map* map = bpf_object__find_map_by_name(obj_ptr.get(), map_name.c_str());
-            if(!map){   //실제 .o에서 해당 맵의 정의가 없음
-                error_code ec3(ENOENT, std::generic_category());
-                utils::log("bpf_object__find_map_by_name(map name: " + map_name + "): " + ec3.message());
-                return BpfProgLoaderError::kBpfProgDontUseTheMap;
-            }
-
-            // 이름으로 참조하는 맵이 실제로 어디에 핀되어있는지 알려주는 코드
-            fs::path pinned_map_path = fs::path(kDefaultBpfPath)/fs::path(map_name);
-            if(!is_exists_file(pinned_map_path)){
-                utils::log(pinned_map_path.string() + " is not exists");
-                return BpfProgLoaderError::kBpfNotExistsThePinnedMap;
-            }
-            const int rc = bpf_map__set_pin_path(map, pinned_map_path.c_str());
-            if(rc < 0){ // 핀 경로 설정 실패
-                error_code ec4(-rc, std::generic_category());
-                utils::log("bpf_map__set_pin_path(map name: " + map_name + "): " + ec4.message());
-                return BpfProgLoaderError::kBpfProgFailedPinnedMapLoad;
-            }
-        }
-
-        // 로드 — 이 시점에 맵 재사용·검증·프로그램 검증이 모두 일어난다
-        int rc = bpf_object__load(obj_ptr.get());
-        if(rc < 0){
-            error_code ec5(-rc, std::generic_category());
-            utils::log("bpf_object__load error: " + ec5.message());
-            return BpfProgLoaderError::kVerifierError;
-        }
-
-        // 프로그램 핀
-        fs::path pinned_prog_path = fs::path(kDefaultBpfPath) / fs::path(function_name);
-        if(is_exists_file(pinned_prog_path)){
-            utils::log("already exists the pin file: " + pinned_prog_path.string());
-            return BpfProgLoaderError::kAlreadyExistsError;
-        }
-        rc = bpf_program__pin(prog, pinned_prog_path.c_str());
-        if(rc < 0){
-            error_code ec6(-rc, std::generic_category());
-            utils::log("bpf_program__pin: " + ec6.message());
-            return BpfProgLoaderError::kBpfProgPinError;
-        }
-
-        return BpfProgLoaderError::kNoError;
     }
 
     optional<bool> is_applied_tc_filter(int ifindex, int handle, int priority, bool is_ingress = true){
@@ -191,25 +124,27 @@ namespace{
 }
 
 BpfProgLoader::BpfProgLoader(const string& prog_path, int handle, int priority, bool is_ingress): 
-    prog_obj_path_{prog_path}, handle_{handle}, priority_{priority}, is_ingress_{is_ingress} {}
+    prog_obj_path_{prog_path}, handle_{handle}, priority_{priority}, is_ingress_{is_ingress}, is_owner_of_the_pin_{false} {}
 BpfProgLoader::~BpfProgLoader(){
+    loader.stop_monitor();
+
     auto snaps = loader.snapshot();
     for(const auto& [k, v] : *snaps){
         BpfProgLoaderError detach_err = detach_tc_filter(v.ifindex, handle_, priority_, is_ingress_);
         if(detach_err != BpfProgLoaderError::kNoError)
             utils::log(pinned_prog_path_ + " detach failed from " + k);
     }
-    if(!pinned_prog_path_.empty()){
+    if(!pinned_prog_path_.empty() && is_owner_of_the_pin_){
         error_code ignore_ec;
         fs::remove(pinned_prog_path_, ignore_ec);
     }
 }
 
-BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const vector<string>& pinned_map_names){
+BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const vector<BpfBase*>& pinned_maps){
     // 프로그램이 핀이 안되어있다면 핀하기
     pinned_prog_path_ = (fs::path(kDefaultBpfPath) / fs::path(function_name)).string();
     if(!is_exists_file(fs::path(pinned_prog_path_))){
-        auto err = load_and_pin_prog_obj(prog_obj_path_, function_name, pinned_map_names);
+        auto err = load_and_pin_prog_obj(function_name, pinned_maps);
         if(err != BpfProgLoaderError::kNoError)
             return err;
     }
@@ -233,4 +168,76 @@ BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const v
         return BpfProgLoaderError::kNoError;
 
     return BpfProgLoaderError::kInterfaceMonitorFailed;
+}
+
+BpfProgLoaderError BpfProgLoader::load_and_pin_prog_obj(const string& function_name, const vector<BpfBase*>& pinned_maps){
+    fs::path obj_path{prog_obj_path_};
+    if(!is_exists_file(obj_path))
+        return BpfProgLoaderError::kProgObjectNotExistsError;
+
+    // .o파일 열기.
+    bpf_object* obj = bpf_object__open_file(obj_path.c_str(), nullptr);
+    if(!obj){
+        error_code ec1(errno, std::generic_category());
+        utils::log("bpf_object__open_file error: " + ec1.message());
+        return BpfProgLoaderError::kBpfObjectOpenFailed;
+    }
+    unique_ptr<bpf_object, decltype(&::bpf_object__close)> obj_ptr{obj, &::bpf_object__close};
+
+    // 프로그램 타입 지정. SEC("classifier") 는 자동 추론이 안 된다.
+    bpf_program* prog = bpf_object__find_program_by_name(obj_ptr.get(), function_name.c_str());
+    if(!prog){
+        error_code ec2(ENOENT, std::generic_category());
+        utils::log("bpf_object__find_program_by_name: " + ec2.message());
+        return BpfProgLoaderError::kBpfFunctionNameNotFoundError;
+    }
+    bpf_program__set_type(prog, BPF_PROG_TYPE_SCHED_CLS); // 실제 타입 지정 파트(분류)
+
+    // 만둘어둔 pinned map들을 붙여주는 경로.
+    for(auto pinned_map: pinned_maps){
+        bpf_map* map = bpf_object__find_map_by_name(obj_ptr.get(), pinned_map->get_name().c_str());
+        if(!map){   //실제 .o에서 해당 맵의 정의가 없음
+            error_code ec3(ENOENT, std::generic_category());
+            utils::log("bpf_object__find_map_by_name(map name: " + pinned_map->get_name() + "): " + ec3.message());
+            return BpfProgLoaderError::kBpfProgDontUseTheMap;
+        }
+
+        // 이름으로 참조하는 맵이 실제로 어디에 핀되어있는지 알려주는 코드
+        fs::path pinned_map_path = pinned_map->get_pin_path();
+        if(!is_exists_file(pinned_map_path)){
+            utils::log(pinned_map_path.string() + " is not exists");
+            return BpfProgLoaderError::kBpfNotExistsThePinnedMap;
+        }
+        const int rc = bpf_map__reuse_fd(map, pinned_map->get_fd());
+        if(rc < 0){ // 핀 경로 설정 실패
+            error_code ec4(-rc, std::generic_category());
+            utils::log("bpf_map__reuse_fd(map name: " + pinned_map->get_name() + "): " + ec4.message());
+            return BpfProgLoaderError::kBpfProgFailedPinnedMapLoad;
+        }
+    }
+
+    // 로드 — 이 시점에 맵 재사용·검증·프로그램 검증이 모두 일어난다
+    int rc = bpf_object__load(obj_ptr.get());
+    if(rc < 0){
+        error_code ec5(-rc, std::generic_category());
+        utils::log("bpf_object__load error: " + ec5.message());
+        return BpfProgLoaderError::kVerifierError;
+    }
+
+    // 프로그램 핀
+    fs::path pinned_prog_path = fs::path(kDefaultBpfPath) / fs::path(function_name);
+    if(is_exists_file(pinned_prog_path)){
+        utils::log("already exists the pin file: " + pinned_prog_path.string());
+        is_owner_of_the_pin_ = false;
+        return BpfProgLoaderError::kNoError; // 다른 곳에서 핀이 되어있어도 NoError이다.
+    }
+    rc = bpf_program__pin(prog, pinned_prog_path.c_str());
+    if(rc < 0){
+        error_code ec6(-rc, std::generic_category());
+        utils::log("bpf_program__pin: " + ec6.message());
+        return BpfProgLoaderError::kBpfProgPinError;
+    }
+
+    is_owner_of_the_pin_ = true;
+    return BpfProgLoaderError::kNoError;
 }

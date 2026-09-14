@@ -1,8 +1,9 @@
 /*
 Class Name   : bpf_map_control.cpp
-@version     : 1.0
+@version     : 1.1
 @author      : Inkiiee
 @modify      : 2026-09-07, 프로그램 작성
+               2026-09-14, pin되어있는 맵을 사용할 때, 정보를 가져오는 load_map_info 함수 추가
 */
 
 #include "bpf_map_control.h"
@@ -32,6 +33,11 @@ BpfControlErrorCode BpfMapControl::open(bool is_pinned, const string& pin_path){
         if(fd_ < 0){
             fd_ = -1; // Reset fd_ to indicate failure
             return BpfControlErrorCode::kOpenError; // Failed to open the pinned map
+        }
+
+        if(!load_map_info()){
+            close();
+            return BpfControlErrorCode::kOpenError;
         }
         
         this->pin_path_ = pin_path; // Store the pin path
@@ -119,4 +125,23 @@ BpfControlErrorCode BpfMapControl::get_next_key(const void* key, void* next_key)
     }
 
     return BpfControlErrorCode::kNoError;
+}
+
+bool BpfMapControl::load_map_info(){
+    if(!is_open()) return false;
+
+    bpf_map_info info;
+    std::uint32_t info_len;
+    int rc = bpf_obj_get_info_by_fd(fd_, &info, &info_len);
+    if(rc < 0) return false;
+
+    if(info.type == BPF_MAP_TYPE_PERF_EVENT_ARRAY
+    || info.type == BPF_MAP_TYPE_RINGBUF) return false;
+
+    name_ = info.name;
+    key_size_ = info.key_size;
+    value_size_ = info.value_size;
+    map_type_ = static_cast<bpf_map_type>(info.type);
+    max_entries_ = info.max_entries;
+    return true;
 }
