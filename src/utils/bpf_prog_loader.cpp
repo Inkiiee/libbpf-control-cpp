@@ -137,20 +137,19 @@ BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const v
                         utils::log("Success");
                     else{
                         utils::log("filter re-attach failed (interface name: " + i + ")");
-                        lock_guard<mutex> lock(failed_nics_mutex_);
                         failed_nics_.insert(i);
                         has_failed_filter_.store(true);
                         has_failed_filter_.notify_one();
                     }
                 }
 
-                if(failed_nics_.empty())
+                if(failed_nics_.empty()){
                     is_success = true;
+                    has_failed_filter_.store(false);
+                }
             }
 
-            if(is_success)
-                has_failed_filter_.store(false);
-            else
+            if(!is_success)
                 this_thread::sleep_for(1000ms);
         }
     });
@@ -390,11 +389,11 @@ void BpfProgLoader::clear_target_nics(){
     for(const auto& i: target_nics_){
         auto is_applied = is_applied_filter_by_ifname(i);
         if((is_applied && *is_applied) && prog_id_ >= 0){
-            auto err = detach_filter_by_ifname(target_ifname);
+            auto err = detach_filter_by_ifname(i);
             if(err == BpfProgLoaderError::kNoError)
-                utils::log("removed filter in " + target_ifname);
+                utils::log("removed filter in " + i);
             else
-                utils::log("failed remove filter in " + target_ifname);
+                utils::log("failed remove filter in " + i);
         }
     }
     target_nics_.clear();
