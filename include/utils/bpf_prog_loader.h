@@ -12,6 +12,7 @@ Class Name   : bpf_prog_loader.h
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "nic_check/interface_loader.h"
@@ -32,7 +33,8 @@ namespace utils{
         kBpfAttachError,
         kProgGetFdError,
         kBpfDetachError,
-        kInterfaceMonitorFailed
+        kInterfaceMonitorFailed,
+        kGetProgIdError
     };
 
     class BpfProgLoader{
@@ -54,8 +56,10 @@ namespace utils{
         int priority_;
         bool is_ingress_;
         bool is_owner_of_the_pin_;
+        std::optional<std::uint32_t> prog_id_;
 
         BpfProgLoaderError load_and_pin_prog_obj(const std::string& function_name, const std::vector<bpf_control::BpfBase*>& pinned_maps);
+        BpfProgLoaderError attach_to_interfaces(nic_check::InterfaceLoader::SnapshotPtr interfaces);
     };
 }
 

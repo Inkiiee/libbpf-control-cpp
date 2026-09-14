@@ -95,8 +95,8 @@ BpfControlErrorCode BpfRingBufferControl::close(){
 bool BpfRingBufferControl::load_map_info(){
     if(!is_open()) return false;
 
-    bpf_map_info info;
-    std::uint32_t info_len;
+    bpf_map_info info{};
+    std::uint32_t info_len = sizeof(info);
     int rc = bpf_obj_get_info_by_fd(fd_, &info, &info_len);
     if(rc < 0) return false;
 

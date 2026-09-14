@@ -62,12 +62,12 @@ bool open_or_create(BpfObject& object, const string& name, const string& pin_pat
     return true;
 }
 
-void set_monitoring_target(BpfMapControl& map, const string& ifname){
+bool set_monitoring_target(BpfMapControl& map, const string& ifname){
     auto snapshot = in.snapshot();
     auto info = snapshot->find(ifname);
     if(info == snapshot->end()){
         utils::log("monitoring target not found: " + ifname);
-        return;
+        return false;
     }
 
     monitor_key key = info->second.ifindex;
@@ -77,20 +77,21 @@ void set_monitoring_target(BpfMapControl& map, const string& ifname){
     if(rc != BpfControlErrorCode::kNoError){
         utils::log("monitor_map update failed(" + ifname + "): " +
                    string(bpf_control_error_string(rc)));
-        return;
+        return false;
     }
 
     utils::log("monitoring on: " + ifname + " (ifindex=" + to_string(key) + ")");
+    return true;
 }
 
-void set_mirroring(BpfMapControl& map, const string& src_ifname, const string& dst_ifname){
+bool set_mirroring(BpfMapControl& map, const string& src_ifname, const string& dst_ifname){
     auto snapshot = in.snapshot();
     auto src_info = snapshot->find(src_ifname);
     auto dst_info = snapshot->find(dst_ifname);
     if(src_info == snapshot->end() || dst_info == snapshot->end()){
         utils::log("mirroring target not found: " +
                    (src_info == snapshot->end() ? src_ifname : dst_ifname));
-        return;
+        return false;
     }
 
     mirror_key key = src_info->second.ifindex;
@@ -103,7 +104,7 @@ void set_mirroring(BpfMapControl& map, const string& src_ifname, const string& d
 
     if(value.dst_ifindex_count >= MIRRORING_MAX_INSTANCES){
         utils::log("mirror targets are full for " + src_ifname);
-        return;
+        return false;
     }
 
     value.enabled = 1;
@@ -114,21 +115,32 @@ void set_mirroring(BpfMapControl& map, const string& src_ifname, const string& d
     if(rc != BpfControlErrorCode::kNoError){
         utils::log("mirror_map update failed(" + src_ifname + " -> " + dst_ifname + "): " +
                    string(bpf_control_error_string(rc)));
-        return;
+        return false;
     }
 
     utils::log("mirroring: " + src_ifname + " -> " + dst_ifname +
                " (targets=" + to_string(value.dst_ifindex_count) + ")");
+    return true;
 }
 
-int main(){
+int main(int argc, char* argv[]){
+    if(argc != 4){
+        cerr << "Usage: " << argv[0]
+             << " <bpf-object-path> <source-interface> <destination-interface>\n";
+        return 2;
+    }
+
+    const string bpf_object_path = argv[1];
+    const string source_ifname = argv[2];
+    const string destination_ifname = argv[3];
+
     sigset_t termination_signals {};
     sigemptyset(&termination_signals);
     sigaddset(&termination_signals, SIGINT);
     sigaddset(&termination_signals, SIGTERM);
     const int mask_error = pthread_sigmask(SIG_BLOCK, &termination_signals, nullptr);
     if(mask_error != 0){
-        error_code ec(-mask_error, generic_category());
+        error_code ec(mask_error, generic_category());
         utils::log("signals block failed: " + ec.message());
         return mask_error;
     }
@@ -144,12 +156,15 @@ int main(){
     if(!open_or_create(monitor_ringbuf, "monitor_ringbuf", "/sys/fs/bpf/monitor_ringbuf"))
         return 1;
 
-    set_mirroring(mirror_map, "eth0", "eth3");
-    set_mirroring(mirror_map, "eth3", "eth0");
-    set_monitoring_target(monitor_map, "eth0");
-    set_monitoring_target(monitor_map, "eth3");
+    const bool policy_ready =
+        set_mirroring(mirror_map, source_ifname, destination_ifname) &&
+        set_mirroring(mirror_map, destination_ifname, source_ifname) &&
+        set_monitoring_target(monitor_map, source_ifname) &&
+        set_monitoring_target(monitor_map, destination_ifname);
+    if(!policy_ready)
+        return 1;
 
-    BpfProgLoader loader("/home/root/tc_mirroring.o");
+    BpfProgLoader loader(bpf_object_path);
     std::vector<BpfBase*> pinned {&mirror_map, &monitor_map, &monitor_ringbuf};
     const auto load_error = loader.load_prog("tc_mirroring", pinned);
     if(load_error != BpfProgLoaderError::kNoError){
@@ -198,7 +213,7 @@ int main(){
     jthread monitor_thread;
     monitor_thread = jthread([&monitor_ringbuf](stop_token token){
         BpfRingBufferControl::ring_buffer_sample_callback 
-            monitor_cb=[](void *ctx, void *data, size_t size) -> int
+            monitor_cb=[](void*, void *data, size_t size) -> int
         {
             if(size < sizeof(monitor_event)){
                 utils::log("MOnitor error, received event size is too small");
@@ -206,8 +221,8 @@ int main(){
             }
 
             monitor_event * event = reinterpret_cast<monitor_event*>(data);
-            const string&& src = ip_to_string(event->src_ip);
-            const string&& dst = ip_to_string(event->dst_ip);
+            const string src = ip_to_string(event->src_ip);
+            const string dst = ip_to_string(event->dst_ip);
             utils::log(src + " -> " + dst);
             return 0;
         };

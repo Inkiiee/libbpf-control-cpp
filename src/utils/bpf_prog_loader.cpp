@@ -42,7 +42,33 @@ namespace{
         return false;
     }
 
-    optional<bool> is_applied_tc_filter(int ifindex, int handle, int priority, bool is_ingress = true){
+    optional<std::uint32_t> get_prog_id(const string& pin_path){
+        const int prog_fd = bpf_obj_get(pin_path.c_str());
+        if(prog_fd < 0){
+            utils::log("bpf_obj_get error: " + pin_path);
+            return nullopt;
+        }
+
+        bpf_prog_info info{};
+        std::uint32_t info_len = sizeof(info);
+        const int rc = bpf_obj_get_info_by_fd(prog_fd, &info, &info_len);
+        ::close(prog_fd);
+        if(rc < 0){
+            error_code ec(errno, std::generic_category());
+            utils::log("bpf_obj_get_info_by_fd error: " + ec.message());
+            return nullopt;
+        }
+
+        return info.id;
+    }
+
+    optional<bool> is_applied_tc_filter(
+        int ifindex,
+        int handle,
+        int priority,
+        std::uint32_t expected_prog_id,
+        bool is_ingress = true
+    ){
         struct bpf_tc_hook hook = {};
         hook.sz           = sizeof(hook);
         hook.ifindex      = ifindex;
@@ -54,14 +80,27 @@ namespace{
         query.priority = priority;
 
         int rc = bpf_tc_query(&hook, &query);
-        if(rc == 0) return true;
-        else if(rc == -ENOENT) return false;
+        if(rc == 0)
+            return query.prog_id == expected_prog_id;
+        if(rc == -ENOENT)
+            return false;
+
+        error_code ec(-rc, std::generic_category());
+        utils::log("bpf_tc_query error: " + ec.message());
         return nullopt;
     }
 
-    BpfProgLoaderError attach_tc_filter(int ifindex, const std::string& path, int handle, int priority, bool is_ingress = true){
-        optional<bool> is_exist_filter = is_applied_tc_filter(ifindex, handle, priority, is_ingress);
-        if(is_exist_filter && *is_exist_filter)
+    BpfProgLoaderError attach_tc_filter(
+        int ifindex,
+        const std::string& path,
+        int handle,
+        int priority,
+        std::uint32_t expected_prog_id,
+        bool is_ingress = true
+    ){
+        const auto is_exist_filter = is_applied_tc_filter(
+            ifindex, handle, priority, expected_prog_id, is_ingress);
+        if(is_exist_filter.value_or(false))
             return BpfProgLoaderError::kNoError;
 
         struct bpf_tc_hook hook = {};
@@ -128,11 +167,18 @@ BpfProgLoader::BpfProgLoader(const string& prog_path, int handle, int priority, 
 BpfProgLoader::~BpfProgLoader(){
     loader.stop_monitor();
 
-    auto snaps = loader.snapshot();
-    for(const auto& [k, v] : *snaps){
-        BpfProgLoaderError detach_err = detach_tc_filter(v.ifindex, handle_, priority_, is_ingress_);
-        if(detach_err != BpfProgLoaderError::kNoError)
-            utils::log(pinned_prog_path_ + " detach failed from " + k);
+    if(prog_id_){
+        auto snaps = loader.snapshot();
+        for(const auto& [k, v] : *snaps){
+            const auto is_ours = is_applied_tc_filter(
+                v.ifindex, handle_, priority_, *prog_id_, is_ingress_);
+            if(!is_ours.value_or(false))
+                continue;
+
+            BpfProgLoaderError detach_err = detach_tc_filter(v.ifindex, handle_, priority_, is_ingress_);
+            if(detach_err != BpfProgLoaderError::kNoError)
+                utils::log(pinned_prog_path_ + " detach failed from " + k);
+        }
     }
     if(!pinned_prog_path_.empty() && is_owner_of_the_pin_){
         error_code ignore_ec;
@@ -149,19 +195,18 @@ BpfProgLoaderError BpfProgLoader::load_prog(const string& function_name, const v
             return err;
     }
 
-    auto interface_snapshots = loader.snapshot();
-    for(const auto& [k, v]: *interface_snapshots){
-        utils::log("attach target: " + k + " <- " + pinned_prog_path_);
-        if(attach_tc_filter(v.ifindex, pinned_prog_path_, handle_, priority_, is_ingress_) == BpfProgLoaderError::kNoError)
-            utils::log("Success");
-    }
+    prog_id_ = get_prog_id(pinned_prog_path_);
+    if(!prog_id_)
+        return BpfProgLoaderError::kGetProgIdError;
+
+    const auto initial_attach_error = attach_to_interfaces(loader.snapshot());
+    if(initial_attach_error != BpfProgLoaderError::kNoError)
+        return initial_attach_error;
 
     bool is_start = loader.start_monitor([this](InterfaceLoader::SnapshotPtr snaps){
-        for(const auto& [k, v]: *snaps){
-            utils::log("attach target: " + k + " <- " + pinned_prog_path_);
-            if(attach_tc_filter(v.ifindex, pinned_prog_path_, handle_, priority_, is_ingress_) == BpfProgLoaderError::kNoError)
-                utils::log("Success");
-        }
+        const auto err = attach_to_interfaces(std::move(snaps));
+        if(err != BpfProgLoaderError::kNoError)
+            utils::log("hotplug attach pass completed with failures");
     });
 
     if(is_start)
@@ -240,4 +285,31 @@ BpfProgLoaderError BpfProgLoader::load_and_pin_prog_obj(const string& function_n
 
     is_owner_of_the_pin_ = true;
     return BpfProgLoaderError::kNoError;
+}
+
+BpfProgLoaderError BpfProgLoader::attach_to_interfaces(InterfaceLoader::SnapshotPtr interfaces){
+    BpfProgLoaderError first_error = BpfProgLoaderError::kNoError;
+
+    for(const auto& [ifname, info] : *interfaces){
+        utils::log("attach target: " + ifname + " <- " + pinned_prog_path_);
+        const auto err = attach_tc_filter(
+            info.ifindex,
+            pinned_prog_path_,
+            handle_,
+            priority_,
+            *prog_id_,
+            is_ingress_
+        );
+        if(err == BpfProgLoaderError::kNoError){
+            utils::log("attach succeeded: " + ifname);
+            continue;
+        }
+
+        utils::log("attach failed: " + ifname + " (code=" +
+                   to_string(static_cast<std::uint32_t>(err)) + ")");
+        if(first_error == BpfProgLoaderError::kNoError)
+            first_error = err;
+    }
+
+    return first_error;
 }
