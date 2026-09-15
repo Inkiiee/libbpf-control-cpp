@@ -21,9 +21,9 @@ find_package(Threads REQUIRED)
 
 set(SRCS
     src/main.cpp
-    src/bpf_tool/bpf_map_control.cpp
-    src/bpf_tool/bpf_ring_buffer_control.cpp
-    src/bpf_tool/bpf_perf_buffer_control.cpp
+    src/bpf_map_control/bpf_map_control.cpp
+    src/bpf_map_control/bpf_ring_buffer_control.cpp
+    src/bpf_map_control/bpf_perf_buffer_control.cpp
     src/nic_check/interface_loader.cpp
     src/utils/safe_command.cpp
     src/utils/bpf_prog_loader.cpp
@@ -42,7 +42,7 @@ target_compile_options(bpf_control PRIVATE
 target_include_directories(bpf_control PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_tool
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_map_control
 )
 target_include_directories(bpf_control SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party

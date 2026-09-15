@@ -28,7 +28,6 @@ namespace utils{
         kNoError = 0,
         kVerifierError = 1,
         kProgObjectNotExistsError,
-        kBpfFunctionNameNotFoundError,
         kBpfProgPinError,
         kBpfObjectOpenFailed,
         kBpfProgDontUseTheMap,
