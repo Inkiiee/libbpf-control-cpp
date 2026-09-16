@@ -36,7 +36,14 @@ BpfAttachManager::BpfAttachManager(){
                 }
 
                 retry_cv_.wait_until(lock, wake_at, [this, &stop]{
-                    return stop.stop_requested();       // 새 요청은 notify 로 깨운다
+                    if(stop.stop_requested()) return true;
+
+                    const auto now = Clock::now();
+                    for(const auto& r: apply_requests_){
+                        if(r.is_immediate) return true;
+                        if(r.request_time + r.retry_count * kDefaultDelay <= now) return true;
+                    }
+                    return false;
                 });
                 if(stop.stop_requested()) break;
 
@@ -76,7 +83,7 @@ BpfAttachManager::BpfAttachManager(){
 }
 BpfAttachManager::~BpfAttachManager(){
     loader_.stop_monitor();
-    
+
     if(retry_thread_.joinable()){
         retry_thread_.request_stop();
         retry_cv_.notify_all();
