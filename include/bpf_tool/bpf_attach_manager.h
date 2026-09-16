@@ -15,7 +15,8 @@
 #include "nic_check/interface_loader.h"
 
 namespace bpf_tool{
-    using TimePoint = std::chrono::system_clock::time_point;
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
 
     struct ApplyRequest{
         int id;
@@ -27,8 +28,8 @@ namespace bpf_tool{
             : id{other.id}, retry_count{other.retry_count}, is_immediate{other.is_immediate}, request_time{other.request_time} {}
         ApplyRequest(const ApplyRequest& other)
             : id{other.id}, retry_count{other.retry_count}, is_immediate{other.is_immediate}, request_time{other.request_time} {}
-        ApplyRequest(int i, bool is = false, int r = 0)
-            : id{i}, retry_count{r}, is_immediate{is}, request_time{std::chrono::system_clock::now()} {}
+        explicit ApplyRequest(int i, bool is = false, int r = 0)
+            : id{i}, retry_count{r}, is_immediate{is}, request_time{Clock::now()} {}
 
         ApplyRequest& operator=(ApplyRequest&& other){
             id = other.id;

@@ -22,26 +22,40 @@ namespace {
 BpfAttachManager::BpfAttachManager(){
     retry_thread_ = jthread([this](std::stop_token stop){
         while(!stop.stop_requested()){
-            ApplyRequestQueue apply_requests_snap;
+            ApplyRequestQueue ready;
             {
                 unique_lock<mutex> lock(retry_cv_mutex_);
-                retry_cv_.wait_for(lock, kDefaultDelay, [this, &stop](){
-                    return !apply_requests_.empty() || stop.stop_requested();
+
+                // 다음에 처리할 게 언제인지 계산해서 그때까지 잔다
+                auto wake_at = Clock::now() + kDefaultDelay;
+                for(const auto& r: apply_requests_){
+                    const auto due = r.is_immediate
+                        ? Clock::now()
+                        : r.request_time + r.retry_count * kDefaultDelay;
+                    wake_at = std::min(wake_at, due);
+                }
+
+                retry_cv_.wait_until(lock, wake_at, [this, &stop]{
+                    return stop.stop_requested();       // 새 요청은 notify 로 깨운다
                 });
                 if(stop.stop_requested()) break;
 
-                apply_requests_snap.swap(apply_requests_);
+                // 마감이 된 것만 꺼내고 나머지는 큐에 남긴다
+                const auto now = Clock::now();
+                for(auto it = apply_requests_.begin(); it != apply_requests_.end(); ){
+                    const auto due = it->request_time + it->retry_count * kDefaultDelay;
+                    if(it->is_immediate || due <= now){
+                        ready.insert(*it);
+                        it = apply_requests_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
             }
 
-            for(const auto& request: apply_requests_snap){
-                bool is_time = (request.request_time + (request.retry_count * kDefaultDelay)) <= chrono::system_clock::now();
-                bool is_immediate = request.is_immediate;
-
-                if(is_time || is_immediate){
-                    bool success = apply_targets_policy_per_attacher(request);
-                    if(!success)
-                        utils::log("failed apply id: " + to_string(request.id));
-                }
+            for(const auto& request: ready){
+                if(!apply_targets_policy_per_attacher(request))
+                    utils::log("failed apply id: " + to_string(request.id));
             }
         }
     });
@@ -61,13 +75,13 @@ BpfAttachManager::BpfAttachManager(){
     });
 }
 BpfAttachManager::~BpfAttachManager(){
+    loader_.stop_monitor();
+    
     if(retry_thread_.joinable()){
         retry_thread_.request_stop();
         retry_cv_.notify_all();
         retry_thread_.join();
     }
-
-    loader_.stop_monitor();
 }
 
 void BpfAttachManager::attacher_policy_change_process(int id){
