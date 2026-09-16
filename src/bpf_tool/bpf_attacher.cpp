@@ -76,16 +76,15 @@ AttachMode Attacher::get_mode(){
 }
 
 void Attacher::change_policy(){
-    PolicyType new_policy;
     {
         lock_guard<mutex> targets_lock(nics_list_mutex_);
         auto next = make_shared<const PolicyType>(
             target_nics_,
-            (mode_ == AttachMode::kAttachAll ? true : false)
+            mode_ == AttachMode::kAttachAll
         );
         policy_snapshot_ = move(next);
     }
-    
+
     if(notify_change_policy_)
         notify_change_policy_(id_);
 }

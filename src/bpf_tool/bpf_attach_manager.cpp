@@ -1,12 +1,16 @@
 #include "bpf_tool/bpf_attach_manager.h"
 
-#include <bpf/libbpf.h>
-#include <bpf/bpf.h>
-#include <linux/bpf.h>
+#include <algorithm>
+#include <cerrno>
+#include <system_error>
 #include <unistd.h>
 
-#include "utils/logger.hpp"
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include <linux/bpf.h>
+
 #include "nic_check/interface_loader.h"
+#include "utils/logger.hpp"
 
 using namespace std;
 using namespace bpf_tool;
@@ -25,40 +29,38 @@ BpfAttachManager::BpfAttachManager(){
             ApplyRequestQueue ready;
             {
                 unique_lock<mutex> lock(retry_cv_mutex_);
-
-                // 다음에 처리할 게 언제인지 계산해서 그때까지 잔다
-                auto wake_at = Clock::now() + kDefaultDelay;
-                for(const auto& r: apply_requests_){
-                    const auto due = r.is_immediate
-                        ? Clock::now()
-                        : r.request_time + r.retry_count * kDefaultDelay;
-                    wake_at = std::min(wake_at, due);
-                }
-
-                retry_cv_.wait_until(lock, wake_at, [this, &stop]{
-                    if(stop.stop_requested()) return true;
-
-                    const auto now = Clock::now();
-                    for(const auto& r: apply_requests_){
-                        if(r.is_immediate) return true;
-                        if(r.request_time + r.retry_count * kDefaultDelay <= now) return true;
-                    }
-                    return false;
+                retry_cv_.wait(lock, [this, &stop]{
+                    return stop.stop_requested() || !apply_requests_.empty();
                 });
-                if(stop.stop_requested()) break;
 
-                // 마감이 된 것만 꺼내고 나머지는 큐에 남긴다
-                const auto now = Clock::now();
-                for(auto it = apply_requests_.begin(); it != apply_requests_.end(); ){
-                    const auto due = it->request_time + it->retry_count * kDefaultDelay;
-                    if(it->is_immediate || due <= now){
-                        ready.insert(*it);
-                        it = apply_requests_.erase(it);
-                    } else {
-                        ++it;
+                while(!stop.stop_requested() && ready.empty()){
+                    const auto now = Clock::now();
+                    for(auto it = apply_requests_.begin(); it != apply_requests_.end(); ){
+                        const auto due = it->request_time + it->retry_count * kDefaultDelay;
+                        if(it->is_immediate || due <= now){
+                            ready.insert(*it);
+                            it = apply_requests_.erase(it);
+                        } else {
+                            ++it;
+                        }
                     }
+
+                    if(!ready.empty())
+                        break;
+
+                    auto wake_at = TimePoint::max();
+                    for(const auto& request: apply_requests_){
+                        const auto due = request.request_time + request.retry_count * kDefaultDelay;
+                        wake_at = std::min(wake_at, due);
+                    }
+
+                    // 새 요청이 들어오면 즉시 깨어나 마감 시간을 다시 계산한다.
+                    retry_cv_.wait_until(lock, wake_at);
                 }
             }
+
+            if(stop.stop_requested())
+                break;
 
             for(const auto& request: ready){
                 if(!apply_targets_policy_per_attacher(request))
@@ -77,8 +79,6 @@ BpfAttachManager::BpfAttachManager(){
         }
         for(int i=0; i<count; i++)
             append_apply_request(ApplyRequest(i, true));
-        
-        retry_cv_.notify_one();
     });
 }
 BpfAttachManager::~BpfAttachManager(){
@@ -93,16 +93,25 @@ BpfAttachManager::~BpfAttachManager(){
 
 void BpfAttachManager::attacher_policy_change_process(int id){
     append_apply_request(ApplyRequest(id, true));
-    retry_cv_.notify_one();
 }
 
 void BpfAttachManager::append_apply_request(ApplyRequest request){
-    lock_guard<mutex> lock(retry_cv_mutex_);
-    auto it = apply_requests_.find(request);
-    if(it!=apply_requests_.end() && it->request_time <= request.request_time) {
-        apply_requests_.erase(it);
+    bool changed = false;
+    {
+        lock_guard<mutex> lock(retry_cv_mutex_);
+        auto it = apply_requests_.find(request);
+        if(it == apply_requests_.end()){
+            apply_requests_.insert(request);
+            changed = true;
+        } else if(it->request_time <= request.request_time){
+            apply_requests_.erase(it);
+            apply_requests_.insert(request);
+            changed = true;
+        }
     }
-    apply_requests_.insert(request);
+
+    if(changed)
+        retry_cv_.notify_one();
 }
 
 bool BpfAttachManager::apply_targets_policy_per_attacher(ApplyRequest request){
@@ -120,6 +129,7 @@ bool BpfAttachManager::apply_targets_policy_per_attacher(ApplyRequest request){
     auto interfaces = loader_.snapshot();
     bool is_apply_success = true;
     for(const auto& [nic_name, info]: *interfaces){
+        (void)info;
         if(policy_ptr->policy.contains(nic_name) || is_all){
             bool is_attach = attach_filter(nic_name, prog_ptr, snap_attach_spec);
             if(!is_attach) {
@@ -150,8 +160,12 @@ bool BpfAttachManager::apply_targets_policy_per_attacher(ApplyRequest request){
     return is_apply_success;
 }
 
-bool BpfAttachManager::is_attach_filter(const string& nic_name, BpfProgramPtr prog, AttachSpec spec){
+BpfAttachManager::FilterQueryResult BpfAttachManager::query_filter(
+    const string& nic_name, BpfProgramPtr prog, AttachSpec spec)
+{
     int ifindex = loader_.get_ifindex_by_ifname(nic_name);
+    if(ifindex <= 0)
+        return {FilterState::kError, -ENODEV};
 
     struct bpf_tc_hook hook = {};
     hook.sz           = sizeof(hook);
@@ -159,17 +173,33 @@ bool BpfAttachManager::is_attach_filter(const string& nic_name, BpfProgramPtr pr
     hook.attach_point = spec.is_ingress ? BPF_TC_INGRESS : BPF_TC_EGRESS;
 
     struct bpf_tc_opts query = {};
-    query.sz = sizeof(query);
-    query.handle = spec.handle;
+    query.sz       = sizeof(query);
+    query.handle   = spec.handle;
     query.priority = spec.priority;
 
     int rc = bpf_tc_query(&hook, &query);
-    if(rc == 0 && query.prog_id == prog->prog_id) return true;
-    return false;
+    if(rc == -ENOENT)
+        return {FilterState::kNotFound, 0};
+    if(rc != 0)
+        return {FilterState::kError, rc};
+    if(query.prog_id == prog->prog_id)
+        return {FilterState::kOurProgram, 0};
+    return {FilterState::kOtherProgram, 0};
 }
 
 bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog, AttachSpec spec){
+    const auto query = query_filter(nic_name, prog, spec);
+    if(query.state == FilterState::kOurProgram)
+        return true;
+    if(query.state == FilterState::kError){
+        error_code ec(-query.error, std::generic_category());
+        utils::log("bpf_tc_query failed while attaching " + nic_name + ": " + ec.message());
+        return false;
+    }
+
     int ifindex = loader_.get_ifindex_by_ifname(nic_name);
+    if(ifindex <= 0)
+        return false;
 
     struct bpf_tc_hook hook = {};
     hook.sz           = sizeof(hook);
@@ -177,7 +207,7 @@ bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog,
     hook.attach_point = spec.is_ingress ? BPF_TC_INGRESS : BPF_TC_EGRESS;
 
     int rc = bpf_tc_hook_create(&hook);
-    if (rc && rc != -EEXIST)
+    if(rc && rc != -EEXIST)
         return false;
 
     struct bpf_tc_opts opts = {};
@@ -185,17 +215,24 @@ bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog,
     opts.prog_fd  = prog->fd;
     opts.handle   = spec.handle;
     opts.priority = spec.priority;
-    opts.flags    = BPF_TC_F_REPLACE;
+    opts.flags    = query.state == FilterState::kOtherProgram ? BPF_TC_F_REPLACE : 0;
     rc = bpf_tc_attach(&hook, &opts);
-    if(rc) return false;
-
-    return true;
+    return rc == 0;
 }
 
 bool BpfAttachManager::detach_filter(const string& nic_name, BpfProgramPtr prog, AttachSpec spec){
-    if(!is_attach_filter(nic_name, prog, spec)) return true;
+    const auto query = query_filter(nic_name, prog, spec);
+    if(query.state == FilterState::kError){
+        error_code ec(-query.error, std::generic_category());
+        utils::log("bpf_tc_query failed while detaching " + nic_name + ": " + ec.message());
+        return false;
+    }
+    if(query.state != FilterState::kOurProgram)
+        return true;
 
     int ifindex = loader_.get_ifindex_by_ifname(nic_name);
+    if(ifindex <= 0)
+        return false;
 
     struct bpf_tc_hook hook = {};
     hook.sz           = sizeof(hook);
@@ -206,11 +243,7 @@ bool BpfAttachManager::detach_filter(const string& nic_name, BpfProgramPtr prog,
     opts.sz       = sizeof(opts);
     opts.handle   = spec.handle;
     opts.priority = spec.priority;
-    // prog_fd / prog_id / flags 는 0 이어야 한다
 
     int rc = bpf_tc_detach(&hook, &opts);
-    if(rc == 0 || rc == -ENOENT)     // 없으면 이미 목적 달성
-        return true;
-
-    return false;
+    return rc == 0 || rc == -ENOENT;
 }

@@ -1,17 +1,17 @@
 #ifndef BPF_ATTACH_MANAGER_H
 #define BPF_ATTACH_MANAGER_H
 
-#include <string>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
-#include <vector>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_set>
-#include <condition_variable>
-#include <chrono>
+#include <vector>
 
-#include "bpf_tool/bpf_types.hpp"
 #include "bpf_tool/bpf_attacher.h"
+#include "bpf_tool/bpf_types.hpp"
 #include "nic_check/interface_loader.h"
 
 namespace bpf_tool{
@@ -73,6 +73,17 @@ namespace bpf_tool{
         }
 
     private:
+        enum class FilterState{
+            kOurProgram,
+            kOtherProgram,
+            kNotFound,
+            kError
+        };
+        struct FilterQueryResult{
+            FilterState state;
+            int error;
+        };
+
         std::mutex attacher_mutex_;
         std::vector<AttacherPtr> attachers_;
         std::jthread retry_thread_;
@@ -88,7 +99,7 @@ namespace bpf_tool{
         void append_apply_request(ApplyRequest request);
 
         bool apply_targets_policy_per_attacher(ApplyRequest request);
-        bool is_attach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
+        FilterQueryResult query_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
         bool attach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
         bool detach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
     };

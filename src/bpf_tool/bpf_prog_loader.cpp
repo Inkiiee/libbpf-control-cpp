@@ -1,17 +1,17 @@
 #include "bpf_tool/bpf_prog_loader.h"
 #include "utils/logger.hpp"
 
+#include <cerrno>
 #include <filesystem>
-#include <system_error>
-#include <string_view>
-#include <optional>
 #include <memory>
+#include <optional>
+#include <string_view>
+#include <system_error>
 
-#include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 #include <linux/bpf.h>
 #include <unistd.h>
-#include <errno.h>
 
 using namespace std;
 using namespace bpf_control;
@@ -20,6 +20,12 @@ using namespace utils;
 namespace fs = std::filesystem;
 
 namespace{
+    struct PinProgResult{
+        string pinned_path;
+        bool is_owner;
+        BpfProgLoaderError error;
+    };
+
     bool is_exists_file(const fs::path& file_path) noexcept {
         error_code err_code;
         if(fs::exists(file_path, err_code))
@@ -116,7 +122,7 @@ namespace{
 
             // 모든 조건을 충족하면 bpf 프로그램의 bpf map과 사용자의 wrapper를 연결한다.
             const int rc = bpf_map__reuse_fd(map, pinned_map->get_fd());
-            if(rc < 0){ // 핀 경로 설정 실패
+            if(rc < 0){
                 error_code ec2(-rc, std::generic_category());
                 utils::log("bpf_map__reuse_fd(map name: " + pinned_map->get_name() + "): " + ec2.message());
                 return BpfProgLoaderError::kBpfProgFailedPinnedMapLoad;
@@ -126,7 +132,6 @@ namespace{
     }
     // bpf 프로그램을 커널로 업로드한다. (실제 verifier 점검이 여기서 이루어진다.)
     BpfProgLoaderError upload_bpf_program_to_kernel(shared_ptr<bpf_object> obj_ptr){
-        // 업로드 — 이 시점에 맵 재사용·검증·프로그램 검증이 모두 일어난다
         int rc = bpf_object__load(obj_ptr.get());
         if(rc < 0){
             error_code ec5(-rc, std::generic_category());
@@ -135,25 +140,27 @@ namespace{
         }
         return BpfProgLoaderError::kNoError;
     }
-    // 업로드된 bpf 프로그램을 pin한다.
-    pair<string, bool> pin_prog(bpf_program* prog, const string& function_name, const string& pin_dir){
-        // 현재 핀이 되어있는지 확인한다.
+    // 업로드된 bpf 프로그램을 pin한다. 기존 핀은 다른 프로그램을 가리킬 수 있으므로 덮어쓰거나 재사용하지 않는다.
+    PinProgResult pin_prog(bpf_program* prog, const string& function_name, const string& pin_dir){
         fs::path pinned_prog_path = fs::path(pin_dir) / fs::path(function_name);
         if(is_exists_file(pinned_prog_path)){
             utils::log("already exists the pin file: " + pinned_prog_path.string());
-            return {pinned_prog_path.string(), false};
+            return {"", false, BpfProgLoaderError::kProgPinPathAlreadyExists};
         }
 
         if(!make_directory_if_not_exist(fs::path(pin_dir)))
-            return {"", false};
+            return {"", false, BpfProgLoaderError::kProgPinError};
 
         int rc = bpf_program__pin(prog, pinned_prog_path.c_str());
         if(rc < 0){
+            if(rc == -EEXIST)
+                return {"", false, BpfProgLoaderError::kProgPinPathAlreadyExists};
+
             error_code ec(-rc, std::generic_category());
             utils::log("bpf_program__pin: " + ec.message());
-            return {"", false};
+            return {"", false, BpfProgLoaderError::kProgPinError};
         }
-        return {pinned_prog_path.string(), true};
+        return {pinned_prog_path.string(), true, BpfProgLoaderError::kNoError};
     }
 
     int get_bpf_prog_fd(bpf_program* prog){
@@ -162,12 +169,11 @@ namespace{
         int fd = bpf_program__fd(prog);
         if(fd < 0) return -1;
 
-        fd = ::dup(fd);
-        return fd;
+        return ::dup(fd);
     }
     std::uint32_t get_bpf_prog_id(int prog_fd){
         if(prog_fd < 0){
-            utils::log("get_bpf_prog_id failed: prog_fd is not invalid");
+            utils::log("get_bpf_prog_id failed: prog_fd is invalid");
             return 0;
         }
 
@@ -203,25 +209,31 @@ BpfProgLoader::BpfProgramPtrAndError BpfProgLoader::load_program(
     if(upload_program_error != BpfProgLoaderError::kNoError)
         return {nullptr, upload_program_error};
 
-    auto [pinned_path, is_owner] = pin_prog(prog, function_name, pin_dir);
-    if(pinned_path.empty())
-        return {nullptr, BpfProgLoaderError::kProgPinError};
-    
     int prog_fd = get_bpf_prog_fd(prog);
     if(prog_fd < 0)
         return {nullptr, BpfProgLoaderError::kGetProgFdError};
 
     std::uint32_t prog_id = get_bpf_prog_id(prog_fd);
-    if(prog_id == 0)
+    if(prog_id == 0){
+        ::close(prog_fd);
         return {nullptr, BpfProgLoaderError::kGetProgIdError};
+    }
+
+    auto pin_result = pin_prog(prog, function_name, pin_dir);
+    if(pin_result.error != BpfProgLoaderError::kNoError){
+        ::close(prog_fd);
+        return {nullptr, pin_result.error};
+    }
 
     BpfProgramPtr program_handle = make_shared<BpfProgram>();
     program_handle->fd = prog_fd;
     program_handle->function_name = function_name;
-    program_handle->is_pin_owner = is_owner;
-    program_handle->pinned_path = pinned_path;
+    program_handle->is_pin_owner = pin_result.is_owner;
+    program_handle->pinned_path = move(pin_result.pinned_path);
     program_handle->prog_id = prog_id;
     program_handle->type = type;
-    program_handle->section_name = bpf_program__section_name(prog);
+    const char* section_name = bpf_program__section_name(prog);
+    if(section_name)
+        program_handle->section_name = section_name;
     return {program_handle, BpfProgLoaderError::kNoError};
 }
