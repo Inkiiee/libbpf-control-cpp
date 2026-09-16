@@ -3,12 +3,11 @@
 
 #include <cstdint>
 #include <string>
+#include <unistd.h>
 #include <filesystem>
 #include <system_error>
 
 namespace bpf_tool{
-    using BpfProgramPtr = std::shared_ptr<BpfProgram>;
-
     struct BpfProgram{
         std::uint32_t prog_id{0};
         bool is_pin_owner{false};
@@ -25,13 +24,16 @@ namespace bpf_tool{
         BpfProgram():prog_id{0}, is_pin_owner{false}, type{-1}, fd{-1}{}
 
         ~BpfProgram(){
-            if(!is_pin_owner) return;
+            if(fd >= 0) ::close(fd);
 
+            if(!is_pin_owner) return;
             std::error_code ignore_ec;
             std::filesystem::path path(pinned_path);
             std::filesystem::remove(path, ignore_ec);
         }
     };
+
+    using BpfProgramPtr = std::shared_ptr<BpfProgram>;
 
     struct AttachSpec{
         int priority{100};

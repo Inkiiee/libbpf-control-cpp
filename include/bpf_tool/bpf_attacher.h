@@ -4,6 +4,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <cstdint>
 #include <unordered_set>
 #include <functional>
 
@@ -15,10 +16,18 @@ namespace bpf_tool{
         kAttachSelective
     };
 
+    using AttachModeType = std::atomic<AttachMode>;
+    using FilterTargets = std::unordered_set<std::string>;
+
+    struct Policy{
+        std::unique_ptr<FilterTargets> policy;
+        bool is_all;
+        Policy(): policy{std::make_unique<FilterTargets>()}, is_all{false} {}
+    };
+    using PolicyPtr = std::shared_ptr<Policy>;
+
     class Attacher{
     public:
-        using AttachModeType = std::atomic<AttachMode>;
-        using FilterTargets = std::unordered_set<std::string>;
         using PolicyChangeCallback = std::function<void(int)>;
 
         Attacher(Attacher&&) = delete;
@@ -32,7 +41,7 @@ namespace bpf_tool{
         void add_target(const std::string& nic_name);
         void remove_target(const std::string& nic_name);
         void clear_targets();
-        FilterTargets get_targets();
+        PolicyPtr get_targets();
 
         void set_mode(AttachMode mode);
         AttachMode get_mode();
@@ -47,7 +56,11 @@ namespace bpf_tool{
         PolicyChangeCallback notify_change_policy_;
         AttachModeType mode_{AttachMode::kAttachSelective};
         FilterTargets target_nics_;
+        PolicyPtr policy_snapshot_;
         std::mutex nics_list_mutex_;
+        std::mutex snapshot_mutex_;
+
+        void change_policy();
     };
 }
 

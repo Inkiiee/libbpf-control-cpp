@@ -18,15 +18,17 @@ namespace bpf_tool{
         kProgDontUseTheBpfMapError,
         kInvalidBpfMapPinPathError,
         kProgPinError,
+        kBpfProgFailedPinnedMapLoad,
         kGetProgFdError,
         kGetProgIdError,
     };
     class BpfProgLoader{
     public:
-        using BpfProgramPtrAndError = std::pair<BpfProgramPtr, BpfProgLoaderError>
+        using BpfProgramPtrAndError = std::pair<BpfProgramPtr, BpfProgLoaderError>;
         static BpfProgramPtrAndError load_program(
-            const std::string& prog_obj_path, const std::string& function_name, int type=BPF_PROG_TYPE_SCHED_CLS,
-            const std::string& pin_dir="/sys/fs/bpf/", const std::vector<bpf_control::BpfBase*>& pinned_maps);
+            const std::string& prog_obj_path, const std::string& function_name, 
+            const std::vector<bpf_control::BpfBase*>& pinned_maps,
+            const std::string& pin_dir="/sys/fs/bpf/", int type=BPF_PROG_TYPE_SCHED_CLS);
     private:
         BpfProgLoader(const BpfProgLoader&) = delete;
         BpfProgLoader(BpfProgLoader&&) = delete;

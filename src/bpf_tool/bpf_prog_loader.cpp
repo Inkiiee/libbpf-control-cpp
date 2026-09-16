@@ -51,7 +51,6 @@ namespace{
 
             // 모니터링/관측 관련 타입
             case BPF_PROG_TYPE_KPROBE:
-            case BPF_PROG_TYPE_KRETPROBE:
             case BPF_PROG_TYPE_TRACEPOINT:
             case BPF_PROG_TYPE_RAW_TRACEPOINT:
 
@@ -91,10 +90,10 @@ namespace{
         if(!prog){
             error_code ec(ENOENT, std::generic_category());
             utils::log("bpf_object__find_program_by_name: " + ec.message());
-            return nullptr
+            return nullptr;
         }
 
-        bpf_program__set_type(prog, type);
+        bpf_program__set_type(prog, static_cast<bpf_prog_type>(type));
         return prog;
     }
     // bpf 프로그램이 사용하는 맵과 C++에서 랩퍼로 연 bpf 맵을 묶는다.
@@ -161,6 +160,10 @@ namespace{
         if(!prog) return -1;
 
         int fd = bpf_program__fd(prog);
+        if(fd < 0) return -1;
+
+        fd = ::dup(fd);
+        return fd;
     }
     std::uint32_t get_bpf_prog_id(int prog_fd){
         if(prog_fd < 0){
@@ -181,9 +184,8 @@ namespace{
     }
 }
 
-BpfProgramPtrAndError BpfProgLoader::load_program(
-    const string& prog_obj_path, const string& function_name, int type,
-    const string& pin_dir, const vector<BpfBase*>& pinned_maps)
+BpfProgLoader::BpfProgramPtrAndError BpfProgLoader::load_program(
+    const string& prog_obj_path, const string& function_name, const vector<BpfBase*>& pinned_maps, const string& pin_dir, int type)
 {
     auto obj_ptr = load_bpf_object(prog_obj_path);
     if(!obj_ptr)

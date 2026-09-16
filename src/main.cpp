@@ -13,12 +13,15 @@
 
 #include "bpf_map_control.h"
 #include "bpf_ring_buffer_control.h"
-#include "utils/bpf_prog_loader.h"
+#include "bpf_tool/bpf_prog_loader.h"
+#include "bpf_tool/bpf_attacher.h"
+#include "bpf_tool/bpf_attach_manager.h"
 #include "utils/logger.hpp"
 #include "tc_bpf/tc_comm.h"
 
 using namespace std;
 using namespace utils;
+using namespace bpf_tool;
 using namespace bpf_control;
 using namespace nic_check;
 
@@ -149,14 +152,22 @@ int main(){
     set_monitoring_target(monitor_map, "eth0");
     set_monitoring_target(monitor_map, "eth3");
 
-    BpfProgLoader loader("/home/root/tc_mirroring.o");
     std::vector<BpfBase*> pinned {&mirror_map, &monitor_map, &monitor_ringbuf};
-    const auto load_error = loader.load_prog("tc_mirroring", pinned);
-    if(load_error != BpfProgLoaderError::kNoError){
-        utils::log("load_prog failed: code=" +
-                   to_string(static_cast<std::uint32_t>(load_error)));
-        return 1;
+    auto [bpf_prog, error] = BpfProgLoader::load_program("/home/root/tc_mirrring.o", "tc_mirrring", pinned);
+    if(error != BpfProgLoaderError::kNoError){
+        utils::log("Prog load error");
+        return -1;
     }
+    
+    auto& manager = BpfAttachManager::get_instance();
+    auto attacher = manager.create_attacher(bpf_prog, {
+        .priority = 100,
+        .handle = 1,
+        .is_ingress = true
+    });
+
+    attacher->add_target("eth0");
+    attacher->add_target("eth1");
 
     atomic<bool> is_running = true;
     condition_variable event_cv;
