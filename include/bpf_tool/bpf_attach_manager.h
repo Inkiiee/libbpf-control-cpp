@@ -46,7 +46,7 @@ namespace bpf_tool{
         bool apply_targets_policy_per_attacher(int id);
         bool is_attach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
         bool attach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
-        bool detach_filter(const std::string& nic_name, AttachSpec spec);
+        bool detach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
     };
 }
 

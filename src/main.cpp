@@ -153,7 +153,7 @@ int main(){
     set_monitoring_target(monitor_map, "eth3");
 
     std::vector<BpfBase*> pinned {&mirror_map, &monitor_map, &monitor_ringbuf};
-    auto [bpf_prog, error] = BpfProgLoader::load_program("/home/root/tc_mirrring.o", "tc_mirrring", pinned);
+    auto [bpf_prog, error] = BpfProgLoader::load_program("/home/root/tc_mirroring.o", "tc_mirroring", pinned);
     if(error != BpfProgLoaderError::kNoError){
         utils::log("Prog load error");
         return -1;

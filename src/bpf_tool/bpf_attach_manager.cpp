@@ -94,11 +94,17 @@ bool BpfAttachManager::apply_targets_policy_per_attacher(int id){
     for(const auto& [nic_name, info]: *interfaces){
         if(policy_ptr->policy->contains(nic_name) || is_all){
             bool is_attach = attach_filter(nic_name, prog_ptr, snap_attach_spec);
-            if(!is_attach) is_apply_success = false;
+            if(!is_attach) {
+                utils::log("failed attach ifname: " + nic_name);
+                is_apply_success = false;
+            }
         }
         else{
-            bool is_detach = detach_filter(nic_name, snap_attach_spec);
-            if(!is_detach) is_apply_success = false;
+            bool is_detach = detach_filter(nic_name, prog_ptr, snap_attach_spec);
+            if(!is_detach) {
+                utils::log("failed detach ifname: " + nic_name);
+                is_apply_success = false;
+            }
         }
     }
 
@@ -152,7 +158,9 @@ bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog,
     return true;
 }
 
-bool BpfAttachManager::detach_filter(const string& nic_name, AttachSpec spec){
+bool BpfAttachManager::detach_filter(const string& nic_name, BpfProgramPtr prog, AttachSpec spec){
+    if(!is_attach_filter(nic_name, prog, spec)) return true;
+
     int ifindex = loader_.get_ifindex_by_ifname(nic_name);
 
     struct bpf_tc_hook hook = {};
