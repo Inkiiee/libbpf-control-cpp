@@ -2,7 +2,6 @@
 #define BPF_ATTACHER_H
 
 #include <string>
-#include <atomic>
 #include <mutex>
 #include <cstdint>
 #include <unordered_set>
@@ -16,15 +15,15 @@ namespace bpf_tool{
         kAttachSelective
     };
 
-    using AttachModeType = std::atomic<AttachMode>;
     using FilterTargets = std::unordered_set<std::string>;
 
-    struct Policy{
-        std::unique_ptr<FilterTargets> policy;
+    struct PolicyType{
+        FilterTargets policy;
         bool is_all;
-        Policy(): policy{std::make_unique<FilterTargets>()}, is_all{false} {}
+        PolicyType(): policy{}, is_all{false} {}
+        PolicyType(const FilterTargets& p, bool all): policy{p}, is_all{all} {}
     };
-    using PolicyPtr = std::shared_ptr<Policy>;
+    using PolicyPtr = std::shared_ptr<const PolicyType>;
 
     class Attacher{
     public:
@@ -54,11 +53,10 @@ namespace bpf_tool{
         AttachSpec attach_spec_;
 
         PolicyChangeCallback notify_change_policy_;
-        AttachModeType mode_{AttachMode::kAttachSelective};
+        AttachMode mode_{AttachMode::kAttachSelective};
         FilterTargets target_nics_;
         PolicyPtr policy_snapshot_;
         std::mutex nics_list_mutex_;
-        std::mutex snapshot_mutex_;
 
         void change_policy();
     };

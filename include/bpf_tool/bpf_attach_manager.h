@@ -8,12 +8,54 @@
 #include <thread>
 #include <unordered_set>
 #include <condition_variable>
+#include <chrono>
 
 #include "bpf_tool/bpf_types.hpp"
 #include "bpf_tool/bpf_attacher.h"
 #include "nic_check/interface_loader.h"
 
 namespace bpf_tool{
+    using TimePoint = std::chrono::system_clock::time_point;
+
+    struct ApplyRequest{
+        int id;
+        int retry_count;
+        bool is_immediate;
+        TimePoint request_time;
+
+        ApplyRequest(ApplyRequest&& other)
+            : id{other.id}, retry_count{other.retry_count}, is_immediate{other.is_immediate}, request_time{other.request_time} {}
+        ApplyRequest(const ApplyRequest& other)
+            : id{other.id}, retry_count{other.retry_count}, is_immediate{other.is_immediate}, request_time{other.request_time} {}
+        ApplyRequest(int i, bool is = false, int r = 0)
+            : id{i}, retry_count{r}, is_immediate{is}, request_time{std::chrono::system_clock::now()} {}
+
+        ApplyRequest& operator=(ApplyRequest&& other){
+            id = other.id;
+            request_time = other.request_time;
+            retry_count = other.retry_count;
+            is_immediate = other.is_immediate;
+            return *this;
+        }
+        ApplyRequest& operator=(const ApplyRequest& other){
+            id = other.id;
+            request_time = other.request_time;
+            retry_count = other.retry_count;
+            is_immediate = other.is_immediate;
+            return *this;
+        }
+        bool operator==(const ApplyRequest& other) const {
+            return id == other.id;
+        }
+    };
+    struct ApplyRequestHash {
+        std::size_t operator()(const ApplyRequest& request) const noexcept {
+            return std::hash<int>{}(request.id);
+        }
+    };
+
+    using ApplyRequestQueue = std::unordered_set<ApplyRequest, ApplyRequestHash>;
+
     class BpfAttachManager{
     public:
         using AttacherPtr = std::shared_ptr<Attacher>;
@@ -36,14 +78,15 @@ namespace bpf_tool{
         nic_check::InterfaceLoader loader_;
         std::condition_variable retry_cv_;
         std::mutex retry_cv_mutex_;
-        std::unordered_set<int> failed_apply_attacher_ids_;
+        ApplyRequestQueue apply_requests_;
 
         BpfAttachManager();
         ~BpfAttachManager();
-        void attacher_policy_change_process(int id);
 
-        void append_failed_attacher_id(int id);
-        bool apply_targets_policy_per_attacher(int id);
+        void attacher_policy_change_process(int id);
+        void append_apply_request(ApplyRequest request);
+
+        bool apply_targets_policy_per_attacher(ApplyRequest request);
         bool is_attach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
         bool attach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);
         bool detach_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);

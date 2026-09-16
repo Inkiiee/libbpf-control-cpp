@@ -17,10 +17,10 @@ namespace bpf_tool{
         std::string pinned_path;
         std::string section_name;
 
-        BpfProgram(BpfProgram&&) = default;
-        BpfProgram& operator=(BpfProgram&&) = default;
-        BpfProgram(const BpfProgram&) = default;
-        BpfProgram& operator=(const BpfProgram&) = default;
+        BpfProgram(BpfProgram&&) = delete;
+        BpfProgram& operator=(BpfProgram&&) = delete;
+        BpfProgram(const BpfProgram&) = delete;
+        BpfProgram& operator=(const BpfProgram&) = delete;
         BpfProgram():prog_id{0}, is_pin_owner{false}, type{-1}, fd{-1}{}
 
         ~BpfProgram(){

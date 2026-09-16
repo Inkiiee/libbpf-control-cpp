@@ -1,7 +1,5 @@
 #include "bpf_tool/bpf_attach_manager.h"
 
-#include <chrono>
-
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include <linux/bpf.h>
@@ -17,27 +15,32 @@ using namespace nic_check;
 using namespace chrono_literals;
 
 namespace {
-
+    inline constexpr auto kDefaultDelay = 500ms;
+    inline constexpr int kMaxRetryCount = 5;
 }
 
 BpfAttachManager::BpfAttachManager(){
     retry_thread_ = jthread([this](std::stop_token stop){
         while(!stop.stop_requested()){
-            unordered_set<int> failed_attacher_ids_snap;
+            ApplyRequestQueue apply_requests_snap;
             {
                 unique_lock<mutex> lock(retry_cv_mutex_);
-                retry_cv_.wait_for(lock, 1000ms, [this, &stop](){
-                    return !failed_apply_attacher_ids_.empty() || stop.stop_requested();
+                retry_cv_.wait_for(lock, kDefaultDelay, [this, &stop](){
+                    return !apply_requests_.empty() || stop.stop_requested();
                 });
                 if(stop.stop_requested()) break;
 
-                failed_attacher_ids_snap.swap(failed_apply_attacher_ids_);
+                apply_requests_snap.swap(apply_requests_);
             }
 
-            for(int id: failed_attacher_ids_snap){
-                bool success = apply_targets_policy_per_attacher(id);
-                if(!success){
-                    utils::log("failed apply id: " + to_string(id));
+            for(const auto& request: apply_requests_snap){
+                bool is_time = (request.request_time + (request.retry_count * kDefaultDelay)) <= chrono::system_clock::now();
+                bool is_immediate = request.is_immediate;
+
+                if(is_time || is_immediate){
+                    bool success = apply_targets_policy_per_attacher(request);
+                    if(!success)
+                        utils::log("failed apply id: " + to_string(request.id));
                 }
             }
         }
@@ -52,47 +55,51 @@ BpfAttachManager::BpfAttachManager(){
             count = attachers_.size();
         }
         for(int i=0; i<count; i++)
-            append_failed_attacher_id(i);
+            append_apply_request(ApplyRequest(i, true));
         
-        retry_cv_.notify_all();
+        retry_cv_.notify_one();
     });
 }
 BpfAttachManager::~BpfAttachManager(){
     if(retry_thread_.joinable()){
         retry_thread_.request_stop();
-        retry_thread_.join();
         retry_cv_.notify_all();
+        retry_thread_.join();
     }
 
     loader_.stop_monitor();
 }
 
 void BpfAttachManager::attacher_policy_change_process(int id){
-    append_failed_attacher_id(id);
+    append_apply_request(ApplyRequest(id, true));
     retry_cv_.notify_one();
 }
 
-void BpfAttachManager::append_failed_attacher_id(int id){
+void BpfAttachManager::append_apply_request(ApplyRequest request){
     lock_guard<mutex> lock(retry_cv_mutex_);
-    failed_apply_attacher_ids_.insert(id);
+    auto it = apply_requests_.find(request);
+    if(it!=apply_requests_.end() && it->request_time <= request.request_time) {
+        apply_requests_.erase(it);
+    }
+    apply_requests_.insert(request);
 }
 
-bool BpfAttachManager::apply_targets_policy_per_attacher(int id){
+bool BpfAttachManager::apply_targets_policy_per_attacher(ApplyRequest request){
     PolicyPtr policy_ptr;
     AttachSpec snap_attach_spec;
     BpfProgramPtr prog_ptr;
     {
         lock_guard<mutex> lock(attacher_mutex_);
-        policy_ptr = attachers_[id]->get_targets();
-        snap_attach_spec = attachers_[id]->get_attach_spec();
-        prog_ptr = attachers_[id]->get_bpf_prog();
+        policy_ptr = attachers_[request.id]->get_targets();
+        snap_attach_spec = attachers_[request.id]->get_attach_spec();
+        prog_ptr = attachers_[request.id]->get_bpf_prog();
     }
 
     bool is_all = policy_ptr->is_all;
     auto interfaces = loader_.snapshot();
     bool is_apply_success = true;
     for(const auto& [nic_name, info]: *interfaces){
-        if(policy_ptr->policy->contains(nic_name) || is_all){
+        if(policy_ptr->policy.contains(nic_name) || is_all){
             bool is_attach = attach_filter(nic_name, prog_ptr, snap_attach_spec);
             if(!is_attach) {
                 utils::log("failed attach ifname: " + nic_name);
@@ -109,8 +116,15 @@ bool BpfAttachManager::apply_targets_policy_per_attacher(int id){
     }
 
     if(!is_apply_success){
-        append_failed_attacher_id(id);
-        retry_cv_.notify_one();
+        request.is_immediate = false;
+        if(++request.retry_count > kMaxRetryCount){
+            utils::log(
+                "Attacher index " + std::to_string(request.id) +
+                " exceeded the maximum retry count."
+            );
+            return false;
+        }
+        append_apply_request(request);
     }
     return is_apply_success;
 }
@@ -127,7 +141,6 @@ bool BpfAttachManager::is_attach_filter(const string& nic_name, BpfProgramPtr pr
     query.sz = sizeof(query);
     query.handle = spec.handle;
     query.priority = spec.priority;
-    query.prog_id = prog->prog_id;
 
     int rc = bpf_tc_query(&hook, &query);
     if(rc == 0 && query.prog_id == prog->prog_id) return true;
