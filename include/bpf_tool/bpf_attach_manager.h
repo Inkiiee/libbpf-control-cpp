@@ -66,7 +66,7 @@ namespace bpf_tool{
         }
 
         AttacherPtr create_attacher(BpfProgramPtr prog, AttachSpec spec){
-            if(!is_valid_) return nullptr;
+            if(!is_valid_ || !prog || prog->fd < 0 || prog->prog_id == 0) return nullptr;
             
             std::lock_guard<std::mutex> lock(attacher_mutex_);
             auto attacher = std::make_shared<Attacher>(prog, spec, attachers_.size(), [this](int id){attacher_policy_change_process(id);});
