@@ -24,6 +24,7 @@ namespace bpf_control{
         BpfRingBufferControl(BpfRingBufferControl&&) = default;
         BpfRingBufferControl& operator=(BpfRingBufferControl&&) = default;
         BpfRingBufferControl(const std::string& name, std::size_t buf_size=1024*64u, void* ctx=nullptr);
+        ~BpfRingBufferControl() override;
 
         // 기본적으로 bpf map과는 open과정이 조금 다름.
         virtual BpfControlErrorCode open(bool is_pinned = false, const std::string& pin_path = "") override;
@@ -45,7 +46,7 @@ namespace bpf_control{
         // 중요: ring buffer는 모든 cpu가 공유하는 링 형태의 큐를 만드는 것이라서, 이벤트 순서가 보장됨.
         // 추가로 모든 cpu가 공유하는 큐를 사용하기 때문에 이벤트를 놓치지 않음. (단, 큐가 꽉 차면 이벤트를 놓침)
 
-        bool load_map_info();
+        BpfControlErrorCode load_map_info();
     };
 }
 

@@ -11,6 +11,8 @@ Class Name   : bpf_map_control.cpp
 #include <cerrno>
 #include <vector>
 
+#include "bpf_runtime/bpf_runtime.hpp"
+
 using namespace bpf_control;
 using namespace std;
 namespace fs = std::filesystem;
@@ -19,6 +21,9 @@ BpfMapControl::BpfMapControl(const string& name, size_t key_sz, size_t value_sz,
     : BpfBase(name, ""), key_size_(key_sz), value_size_(value_sz), max_entries_(max_ent), map_type_(map_type){}
 
 BpfControlErrorCode BpfMapControl::open(bool is_pinned, const string& pin_path){
+    if(bpf_runtime::initialize() < 0)
+        return BpfControlErrorCode::kBpfRuntimeInitError;
+
     if(is_open())
         return BpfControlErrorCode::kAlreadyOpenedError; // Map is already open
 
@@ -26,7 +31,7 @@ BpfControlErrorCode BpfMapControl::open(bool is_pinned, const string& pin_path){
         error_code ignored_ec;
         if(!fs::exists(pin_path, ignored_ec)){
             fd_ = -1; // Reset fd_ to indicate failure
-            return BpfControlErrorCode::kNotOpenedError; // Map is not pinned
+            return BpfControlErrorCode::kNotPinnedError; // Map is not pinned
         }
 
         fd_ = bpf_obj_get(pin_path.c_str()); // Open the pinned BPF map
@@ -35,9 +40,10 @@ BpfControlErrorCode BpfMapControl::open(bool is_pinned, const string& pin_path){
             return BpfControlErrorCode::kOpenError; // Failed to open the pinned map
         }
 
-        if(!load_map_info()){
+        const BpfControlErrorCode info_error = load_map_info();
+        if(info_error != BpfControlErrorCode::kNoError){
             close();
-            return BpfControlErrorCode::kOpenError;
+            return info_error;
         }
         
         this->pin_path_ = pin_path; // Store the pin path
@@ -127,21 +133,54 @@ BpfControlErrorCode BpfMapControl::get_next_key(const void* key, void* next_key)
     return BpfControlErrorCode::kNoError;
 }
 
-bool BpfMapControl::load_map_info(){
-    if(!is_open()) return false;
+// 핀에 있는 맵이 생성자로 요청한 형태와 같은지 확인한다.
+//
+// 커널 값을 그대로 받아들이면 안 된다. 구조체 레이아웃을 바꾼 뒤 예전 핀이
+// bpffs 에 남아 있으면, 호출자는 새 구조체 크기로 버퍼를 잡는데 커널은 핀에
+// 기록된 value_size 만큼 읽고 쓴다. lookup() 한 번에 호출자 스택이 넘어간다.
+// 그래서 덮어쓰지 않고 대조만 하고, 다르면 재사용을 거부한다.
+BpfControlErrorCode BpfMapControl::load_map_info(){
+    if(!is_open()) return BpfControlErrorCode::kNotOpenedError;
 
     bpf_map_info info{};
     std::uint32_t info_len = sizeof(info);
     int rc = bpf_obj_get_info_by_fd(fd_, &info, &info_len);
-    if(rc < 0) return false;
+    if(rc < 0) return BpfControlErrorCode::kOpenError;
 
     if(info.type == BPF_MAP_TYPE_PERF_EVENT_ARRAY
-    || info.type == BPF_MAP_TYPE_RINGBUF) return false;
+    || info.type == BPF_MAP_TYPE_RINGBUF){
+        utils::log("pinned object is an event buffer, not a plain bpf map");
+        return BpfControlErrorCode::kPinnedMapMismatchError;
+    }
+
+    bool is_mismatched = false;
+    if(key_size_ != info.key_size){
+        utils::log("pinned map key_size mismatch: requested=" + to_string(key_size_) +
+                   " pinned=" + to_string(info.key_size));
+        is_mismatched = true;
+    }
+    if(value_size_ != info.value_size){
+        utils::log("pinned map value_size mismatch: requested=" + to_string(value_size_) +
+                   " pinned=" + to_string(info.value_size));
+        is_mismatched = true;
+    }
+    if(max_entries_ != info.max_entries){
+        utils::log("pinned map max_entries mismatch: requested=" + to_string(max_entries_) +
+                   " pinned=" + to_string(info.max_entries));
+        is_mismatched = true;
+    }
+    if(static_cast<std::uint32_t>(map_type_) != info.type){
+        utils::log("pinned map type mismatch: requested=" + to_string(static_cast<std::uint32_t>(map_type_)) +
+                   " pinned=" + to_string(info.type));
+        is_mismatched = true;
+    }
+
+    if(is_mismatched){
+        utils::log(string("refusing to reuse pinned map ") + info.name +
+                   ": layout differs from the requested one");
+        return BpfControlErrorCode::kPinnedMapMismatchError;
+    }
 
     name_ = info.name;
-    key_size_ = info.key_size;
-    value_size_ = info.value_size;
-    map_type_ = static_cast<bpf_map_type>(info.type);
-    max_entries_ = info.max_entries;
-    return true;
+    return BpfControlErrorCode::kNoError;
 }

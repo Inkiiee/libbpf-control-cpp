@@ -8,6 +8,14 @@ Class Name   : tc_comm.h
 #ifndef TC_COMM_H
 #define TC_COMM_H
 
+// 이 헤더는 커널 정수 타입(__u32 등)을 사용한다.
+// BPF 쪽은 vmlinux.h 가 그 타입을 직접 정의하므로 linux/types.h 를 겹치면
+// 중복 정의로 컴파일이 깨진다. 그래서 vmlinux.h 가 이미 들어온 경우엔 건너뛴다.
+// (BPF 프로그램은 vmlinux.h 를 이 헤더보다 먼저 include 해야 한다.)
+#ifndef __VMLINUX_H__
+#include <linux/types.h>
+#endif
+
 #define MIRRORING_MAX_INSTANCES 10
 #define MONITORING_MAX_INSTANCES 10
 #define MONITOR_RINGBUF_SIZE (16*1024*1024u) // 16MB ring buffer size

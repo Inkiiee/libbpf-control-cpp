@@ -6,19 +6,21 @@
 #include <vector>
 #include <thread>
 #include <stop_token>
-#include <cerrno>
-#include <signal.h>
-#include <pthread.h>
+#include <system_error>
 #include <arpa/inet.h>
 
 #include "bpf_map_control.h"
 #include "bpf_ring_buffer_control.h"
-#include "utils/bpf_prog_loader.h"
+#include "bpf_tool/bpf_prog_loader.h"
+#include "bpf_tool/bpf_attacher.h"
+#include "bpf_tool/bpf_attach_manager.h"
 #include "utils/logger.hpp"
+#include "utils/termination_signal_waiter.h"
 #include "tc_bpf/tc_comm.h"
 
 using namespace std;
 using namespace utils;
+using namespace bpf_tool;
 using namespace bpf_control;
 using namespace nic_check;
 
@@ -122,15 +124,29 @@ void set_mirroring(BpfMapControl& map, const string& src_ifname, const string& d
 }
 
 int main(){
-    sigset_t termination_signals {};
-    sigemptyset(&termination_signals);
-    sigaddset(&termination_signals, SIGINT);
-    sigaddset(&termination_signals, SIGTERM);
-    const int mask_error = pthread_sigmask(SIG_BLOCK, &termination_signals, nullptr);
-    if(mask_error != 0){
-        error_code ec(-mask_error, generic_category());
-        utils::log("signals block failed: " + ec.message());
-        return mask_error;
+    atomic<bool> is_running = true;
+    condition_variable event_cv;
+    mutex event_mutex;
+    std::vector<EventType> events;
+
+    auto notify = [&event_mutex, &events, &event_cv](EventType ev){
+        {
+            lock_guard<mutex> lock(event_mutex);
+            events.push_back(ev);
+        }
+        event_cv.notify_one();
+    };
+
+    // 반드시 다른 스레드가 생기기 전에 선언해야 한다. 생성자가 시그널
+    // 마스크를 걸고, 이후에 만들어진 스레드만 그 마스크를 물려받는다.
+    TerminationSignalWaiter signal_waiter([&notify]{
+        notify(EventType::kStop);
+    });
+    const int signal_error = signal_waiter.start();
+    if(signal_error != 0){
+        error_code ec(signal_error, generic_category());
+        utils::log("termination signal waiter start failed: " + ec.message());
+        return signal_error;
     }
 
     BpfMapControl mirror_map("mirror_map", sizeof(mirror_key), sizeof(mirror_value), MIRRORING_MAX_INSTANCES);
@@ -149,57 +165,33 @@ int main(){
     set_monitoring_target(monitor_map, "eth0");
     set_monitoring_target(monitor_map, "eth3");
 
-    BpfProgLoader loader("/home/root/tc_mirroring.o");
     std::vector<BpfBase*> pinned {&mirror_map, &monitor_map, &monitor_ringbuf};
-    const auto load_error = loader.load_prog("tc_mirroring", pinned);
-    if(load_error != BpfProgLoaderError::kNoError){
-        utils::log("load_prog failed: code=" +
-                   to_string(static_cast<std::uint32_t>(load_error)));
-        return 1;
+    auto [bpf_prog, error] = BpfProgLoader::load_program("/home/root/tc_mirroring.o", "tc_mirroring", pinned);
+    if(error != BpfProgLoaderError::kNoError){
+        utils::log("Prog load error");
+        return -1;
+    }
+    
+    auto& manager = BpfAttachManager::get_instance();
+    auto attacher = manager.create_attacher(bpf_prog, {
+        .priority = 100,
+        .handle = 1,
+        .is_ingress = true
+    });
+    if(!attacher){
+        utils::log("Attacher create failed");
+        return -1;
     }
 
-    atomic<bool> is_running = true;
-    condition_variable event_cv;
-    mutex event_mutex;
-    std::vector<EventType> events;
-
-    auto notify = [&event_mutex, &events, &event_cv](EventType ev){
-        {
-            lock_guard<mutex> lock(event_mutex);
-            events.push_back(ev);
-        }
-        event_cv.notify_one();
-    };
-
-    jthread signal_wait_thread;
-    signal_wait_thread = jthread([&notify, &termination_signals](stop_token token){
-        while(!token.stop_requested()){
-            timespec timeout {};
-            timeout.tv_nsec = 200'000'000L;
-
-            const int received_signal = sigtimedwait(&termination_signals, nullptr, &timeout);
-            if(received_signal == SIGINT || received_signal == SIGTERM){
-                utils::log("SIGINT or SIGTERM received");
-                notify(EventType::kStop);
-                break;
-            }
-
-            if(received_signal == -1){
-                const int snap_error = errno;
-                if((snap_error == EAGAIN || snap_error == EINTR)) continue;
-
-                utils::log("wait signals error");
-                notify(EventType::kStop);
-                break;
-            }
-        }
-    });
+    attacher->add_target("eth0");
+    attacher->add_target("eth3");
 
     jthread monitor_thread;
     monitor_thread = jthread([&monitor_ringbuf](stop_token token){
         BpfRingBufferControl::ring_buffer_sample_callback 
             monitor_cb=[](void *ctx, void *data, size_t size) -> int
         {
+            (void)ctx;
             if(size < sizeof(monitor_event)){
                 utils::log("MOnitor error, received event size is too small");
                 return -1;
@@ -238,10 +230,6 @@ int main(){
         }
     }
 
-    if(signal_wait_thread.joinable()){
-        signal_wait_thread.request_stop();
-        signal_wait_thread.join();
-    }
     if(monitor_thread.joinable()){
         monitor_thread.request_stop();
         monitor_thread.join();

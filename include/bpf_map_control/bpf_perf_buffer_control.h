@@ -27,6 +27,7 @@ namespace bpf_control{
         BpfPerfBufferControl(BpfPerfBufferControl&&) = default;
         BpfPerfBufferControl& operator=(BpfPerfBufferControl&&) = default;
         BpfPerfBufferControl(const std::string& name, int page_count=8, void* ctx=nullptr);
+        ~BpfPerfBufferControl() override;
 
         // 기본적으로 bpf map과는 open과정이 조금 다름.
         virtual BpfControlErrorCode open(bool is_pinned = false, const std::string& pin_path = "") override;
@@ -49,7 +50,7 @@ namespace bpf_control{
         perf_buffer_sample_callback sample_cb_ = nullptr; // 커널에서 이벤트가 발생했을 때 호출되는 콜백함수
         perf_buffer_lost_callback lost_cb_ = nullptr; // 커널에서 이벤트를 놓쳤을 때 호출되는 콜백함수
 
-        bool load_map_info();
+        BpfControlErrorCode load_map_info();
     };
 }
 

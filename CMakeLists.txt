@@ -10,6 +10,9 @@ else()
     set(SDKTARGETSYSROOT "" CACHE PATH "Yocto SDK target sysroot path")
 endif()
 
+# BPF 예제는 clang 의 BPF 타겟을 요구한다. 유저스페이스 코드만 빌드하려면 OFF.
+option(BUILD_BPF_EXAMPLE "Build the example TC BPF object (requires clang with BPF target support)" ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -21,12 +24,14 @@ find_package(Threads REQUIRED)
 
 set(SRCS
     src/main.cpp
-    src/bpf_tool/bpf_map_control.cpp
-    src/bpf_tool/bpf_ring_buffer_control.cpp
-    src/bpf_tool/bpf_perf_buffer_control.cpp
+    src/bpf_map_control/bpf_map_control.cpp
+    src/bpf_map_control/bpf_ring_buffer_control.cpp
+    src/bpf_map_control/bpf_perf_buffer_control.cpp
     src/nic_check/interface_loader.cpp
-    src/utils/safe_command.cpp
-    src/utils/bpf_prog_loader.cpp
+    src/bpf_tool/bpf_attach_manager.cpp
+    src/bpf_tool/bpf_attacher.cpp
+    src/bpf_tool/bpf_prog_loader.cpp
+    src/utils/termination_signal_waiter.cpp
 )
 
 add_executable(bpf_control ${SRCS})
@@ -42,15 +47,10 @@ target_compile_options(bpf_control PRIVATE
 target_include_directories(bpf_control PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_tool
-)
-target_include_directories(bpf_control SYSTEM PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio_1.38.0/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_map_control
 )
 
 target_compile_definitions(bpf_control PRIVATE
-    ASIO_STANDALONE
     _GLIBCXX_ASSERTIONS
 )
 
@@ -68,4 +68,6 @@ if(SDKTARGETSYSROOT)
     )
 endif()
 
-add_subdirectory(tc_bpf)
+if(BUILD_BPF_EXAMPLE)
+    add_subdirectory(tc_bpf)
+endif()
