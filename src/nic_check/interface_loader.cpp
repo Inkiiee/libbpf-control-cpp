@@ -29,6 +29,7 @@ Class Name   : interface_loader.cpp
 #include <algorithm>
 #include <mutex>
 #include <memory>
+#include <system_error>
 #include <utility>
 
 using namespace std;
@@ -175,7 +176,10 @@ namespace nic_check{
         return true;
     }
 
-    bool InterfaceLoader::start_monitor(ChangeHandler on_change){
+    bool InterfaceLoader::start_monitor(ChangeHandler on_change, FailureHandler on_failure){
+        if(monitor_status_.load() == MonitorStatus::kFailed)
+            stop_monitor();
+
         if(monitor_status_.load() != MonitorStatus::kStopped){
             utils::log("monitor is already running");
             return false;
@@ -200,22 +204,31 @@ namespace nic_check{
         {
             std::lock_guard<std::mutex> lock(handler_mutex_);
             on_change_ = std::move(on_change);
+            on_failure_ = std::move(on_failure);
         }
 
         // 생성자의 refresh 와 감시 시작 사이에 일어난 변경을 놓치지 않도록 한 번 읽는다.
         dirty_.store(true, std::memory_order_release);
         wake_monitor();
 
-        monitor_thread_ = std::jthread([this](std::stop_token stop){ monitor_loop(stop); });
+        monitor_status_.store(MonitorStatus::kRunning);
+        try{
+            monitor_thread_ = std::jthread([this](std::stop_token stop){ monitor_loop(stop); });
+        } catch(const std::system_error& error){
+            set_last_error(InterfaceError::kMonitorThreadError);
+            utils::log("interface monitor thread start failed: " + std::string(error.what()));
+            stop_monitor();
+            return false;
+        }
+
         utils::log("interface monitor started(debounce=" +
                    std::to_string(debounce_.count()) + "ms)");
 
-        monitor_status_.store(MonitorStatus::kRunning);
         return true;
     }
 
     void InterfaceLoader::stop_monitor(){
-        if(monitor_status_.load() != MonitorStatus::kRunning)
+        if(monitor_status_.load() == MonitorStatus::kStopped && !monitor_thread_.joinable())
             return;
 
         monitor_status_.store(MonitorStatus::kStopping);
@@ -234,6 +247,7 @@ namespace nic_check{
         {
             std::lock_guard<std::mutex> lock(handler_mutex_);
             on_change_ = nullptr;
+            on_failure_ = nullptr;
         }
 
         monitor_status_.store(MonitorStatus::kStopped);
@@ -354,6 +368,7 @@ namespace nic_check{
         std::stop_callback wake_on_stop(stop, [this]{ wake_monitor(); });
 
         bool pending = false;
+        InterfaceError failure = InterfaceError::kNoError;
         std::chrono::steady_clock::time_point deadline{};
 
         while(!stop.stop_requested()){
@@ -376,6 +391,7 @@ namespace nic_check{
 
                 set_last_error(InterfaceError::kPollError);
                 utils::log("poll failed: " + errno_message(error_number));
+                failure = InterfaceError::kPollError;
                 break;
             }
             if(stop.stop_requested()) break;
@@ -392,6 +408,7 @@ namespace nic_check{
             if(fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)){
                 set_last_error(InterfaceError::kNetlinkReceiveError);
                 utils::log("netlink socket entered an error state, stopping monitor");
+                failure = InterfaceError::kNetlinkReceiveError;
                 break;
             }
 
@@ -407,6 +424,12 @@ namespace nic_check{
                 pending = false;
                 refresh_interface_list();
             }
+        }
+
+        if(failure != InterfaceError::kNoError){
+            MonitorStatus expected = MonitorStatus::kRunning;
+            if(monitor_status_.compare_exchange_strong(expected, MonitorStatus::kFailed))
+                notify_failure(failure);
         }
     }
 
@@ -429,6 +452,23 @@ namespace nic_check{
             utils::log(std::string("change handler threw: ") + e.what());
         } catch(...){
             utils::log("change handler threw an unknown exception");
+        }
+    }
+
+    void InterfaceLoader::notify_failure(InterfaceError error){
+        FailureHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(handler_mutex_);
+            handler = on_failure_;
+        }
+        if(!handler) return;
+
+        try{
+            handler(error);
+        } catch(const std::exception& e){
+            utils::log(std::string("failure handler threw: ") + e.what());
+        } catch(...){
+            utils::log("failure handler threw an unknown exception");
         }
     }
 

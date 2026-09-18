@@ -21,6 +21,10 @@ using namespace chrono_literals;
 
 namespace {
     inline constexpr auto kDefaultDelay = 500ms;
+    // 모니터 재시작은 attach 재시도와 성격이 다르다. 인터페이스 변화를 몇 초 늦게
+    // 아는 것은 TC attach 에 영향이 없고(그동안에도 마지막 스냅샷은 유효하다),
+    // netlink 가 영구적으로 안 되는 상황에서 로그가 차는 것만 막으면 된다.
+    inline constexpr auto kMonitorRestartDelay = 5s;
     inline constexpr int kMaxRetryCount = 5;
 }
 
@@ -35,14 +39,20 @@ BpfAttachManager::BpfAttachManager(){
     retry_thread_ = jthread([this](std::stop_token stop){
         while(!stop.stop_requested()){
             ApplyRequestQueue ready;
+            bool restart_loader = false;
             {
                 unique_lock<mutex> lock(retry_cv_mutex_);
                 retry_cv_.wait(lock, [this, &stop]{
-                    return stop.stop_requested() || !apply_requests_.empty();
+                    return stop.stop_requested() || !apply_requests_.empty() || loader_restart_requested_;
                 });
 
-                while(!stop.stop_requested() && ready.empty()){
+                while(!stop.stop_requested() && ready.empty() && !restart_loader){
                     const auto now = Clock::now();
+                    if(loader_restart_requested_ && loader_restart_time_ <= now){
+                        loader_restart_requested_ = false;
+                        restart_loader = true;
+                    }
+
                     for(auto it = apply_requests_.begin(); it != apply_requests_.end(); ){
                         const auto due = it->request_time + it->retry_count * kDefaultDelay;
                         if(it->is_immediate || due <= now){
@@ -53,7 +63,7 @@ BpfAttachManager::BpfAttachManager(){
                         }
                     }
 
-                    if(!ready.empty())
+                    if(!ready.empty() || restart_loader)
                         break;
 
                     auto wake_at = TimePoint::max();
@@ -61,6 +71,8 @@ BpfAttachManager::BpfAttachManager(){
                         const auto due = request.request_time + request.retry_count * kDefaultDelay;
                         wake_at = std::min(wake_at, due);
                     }
+                    if(loader_restart_requested_)
+                        wake_at = std::min(wake_at, loader_restart_time_);
 
                     // 새 요청이 들어오면 즉시 깨어나 마감 시간을 다시 계산한다.
                     retry_cv_.wait_until(lock, wake_at);
@@ -70,6 +82,11 @@ BpfAttachManager::BpfAttachManager(){
             if(stop.stop_requested())
                 break;
 
+            if(restart_loader && !start_interface_monitor()){
+                utils::log("failed restarting interface monitor");
+                request_interface_monitor_restart();
+            }
+
             for(const auto& request: ready){
                 if(!apply_targets_policy_per_attacher(request))
                     utils::log("failed apply id: " + to_string(request.id));
@@ -77,17 +94,7 @@ BpfAttachManager::BpfAttachManager(){
         }
     });
 
-    bool success = loader_.start_monitor([this](InterfaceLoader::SnapshotPtr snaps){
-        (void)snaps;
-
-        int count;
-        {
-            lock_guard<mutex> lock(attacher_mutex_);
-            count = attachers_.size();
-        }
-        for(int i=0; i<count; i++)
-            append_apply_request(ApplyRequest(i, true));
-    });
+    bool success = start_interface_monitor();
     if(!success){
         is_valid_ = false;
         if(retry_thread_.joinable()){
@@ -100,12 +107,45 @@ BpfAttachManager::BpfAttachManager(){
 BpfAttachManager::~BpfAttachManager(){
     if(!is_valid_) return;
 
-    loader_.stop_monitor();
     if(retry_thread_.joinable()){
         retry_thread_.request_stop();
         retry_cv_.notify_all();
         retry_thread_.join();
     }
+    loader_.stop_monitor();
+}
+
+bool BpfAttachManager::start_interface_monitor(){
+    return loader_.start_monitor(
+        [this](InterfaceLoader::SnapshotPtr snaps){ interface_change_process(std::move(snaps)); },
+        [this](InterfaceError error){ interface_monitor_failure_process(error); }
+    );
+}
+
+void BpfAttachManager::interface_change_process(InterfaceLoader::SnapshotPtr snaps){
+    (void)snaps;
+
+    int count;
+    {
+        lock_guard<mutex> lock(attacher_mutex_);
+        count = attachers_.size();
+    }
+    for(int i=0; i<count; i++)
+        append_apply_request(ApplyRequest(i, true));
+}
+
+void BpfAttachManager::interface_monitor_failure_process(InterfaceError error){
+    utils::log("interface monitor failed: " + std::string(interface_loader_error_string(error)));
+    request_interface_monitor_restart();
+}
+
+void BpfAttachManager::request_interface_monitor_restart(){
+    {
+        lock_guard<mutex> lock(retry_cv_mutex_);
+        loader_restart_requested_ = true;
+        loader_restart_time_ = Clock::now() + kMonitorRestartDelay;
+    }
+    retry_cv_.notify_one();
 }
 
 void BpfAttachManager::attacher_policy_change_process(int id){
