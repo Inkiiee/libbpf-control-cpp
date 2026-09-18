@@ -32,6 +32,7 @@ namespace bpf_control {
         kNotOpenedError,
         kAlreadyOpenedError,
         kAlreadyPinnedError,
+        kAlreadyOwnsPinError,
         kCloseError,
         kUpdateError,
         kLookupError,
@@ -67,6 +68,8 @@ namespace bpf_control {
                 return "BPF object is already opened";
             case BpfControlErrorCode::kAlreadyPinnedError:
                 return "BPF object is already pinned";
+            case BpfControlErrorCode::kAlreadyOwnsPinError:
+                return "BPF object already owns a pin";
             case BpfControlErrorCode::kCloseError:
                 return "Failed to close BPF object";
             case BpfControlErrorCode::kUpdateError:
@@ -142,6 +145,9 @@ namespace bpf_control {
         virtual BpfControlErrorCode open(bool is_pinned = false, const std::string& pin_path = "") = 0;
         BpfControlErrorCode pin(const std::string& pin_path){
             if(!is_open()) return BpfControlErrorCode::kNotOpenedError;
+
+            if(is_pin_owner_)
+                return BpfControlErrorCode::kAlreadyOwnsPinError;
 
             std::error_code ec;
             if(std::filesystem::exists(pin_path, ec))
