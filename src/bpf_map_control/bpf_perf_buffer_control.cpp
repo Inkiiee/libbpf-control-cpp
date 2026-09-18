@@ -73,14 +73,12 @@ BpfControlErrorCode BpfPerfBufferControl::event_buffer_create(){
 
     // sample_cb_는 커널에서 이벤트가 발생했을 때 호출되는 콜백함수이고, lost_cb_는 이벤트를 놓쳤을 때 호출되는 콜백함수임.
     if(!sample_cb_ || !lost_cb_){
-        close(); // Close the map if callbacks are not set
         return BpfControlErrorCode::kCallbackNotSetError; // Callbacks must be set before opening the perf buffer
     }
 
     // perf_buffer는 RAII로 관리되며, perf_buffer__free를 사용하여 자동으로 해제됨.
     perfbuf_.reset(perf_buffer__new(fd_, page_count_, sample_cb_, lost_cb_, perf_buf_ctx_, nullptr));
     if(!perfbuf_){
-        close(); // Close the map if perf buffer creation fails
         return BpfControlErrorCode::kBufferMakeError; // Failed to create the perf buffer
     }
 
