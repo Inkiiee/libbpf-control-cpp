@@ -39,7 +39,7 @@ namespace bpf_control{
         std::size_t max_entries_; // 맵에 저장할 수 있는 최대 엔트리 수
         bpf_map_type map_type_; // eBPF 맵의 타입(해쉬 맵인지, 선형큐 형태의 해쉬맵인지 등)
 
-        bool load_map_info();
+        BpfControlErrorCode load_map_info();
     };
 }
 

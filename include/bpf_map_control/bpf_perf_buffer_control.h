@@ -50,7 +50,7 @@ namespace bpf_control{
         perf_buffer_sample_callback sample_cb_ = nullptr; // 커널에서 이벤트가 발생했을 때 호출되는 콜백함수
         perf_buffer_lost_callback lost_cb_ = nullptr; // 커널에서 이벤트를 놓쳤을 때 호출되는 콜백함수
 
-        bool load_map_info();
+        BpfControlErrorCode load_map_info();
     };
 }
 

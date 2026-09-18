@@ -51,7 +51,8 @@ namespace bpf_control {
         kPerfFailedToGetCpuCountError,
         kPollingError,
         kInvalidUnpinError,
-        kBpfRuntimeInitError
+        kBpfRuntimeInitError,
+        kPinnedMapMismatchError
     };
 
     inline constexpr std::string_view bpf_control_error_string(BpfControlErrorCode error_code) {
@@ -106,6 +107,8 @@ namespace bpf_control {
                 return "The Pin path is not allow remove cause the object is not pin file's owner";
             case BpfControlErrorCode::kBpfRuntimeInitError:
                 return "Bpf runtime strict mode set error";
+            case BpfControlErrorCode::kPinnedMapMismatchError:
+                return "The pinned map layout differs from the requested one";
             default:
                 return "Unknown error code";
         }
