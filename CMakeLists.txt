@@ -28,6 +28,7 @@ set(SRCS
     src/bpf_tool/bpf_attach_manager.cpp
     src/bpf_tool/bpf_attacher.cpp
     src/bpf_tool/bpf_prog_loader.cpp
+    src/utils/termination_signal_waiter.cpp
 )
 
 add_executable(bpf_control ${SRCS})
