@@ -93,6 +93,8 @@ namespace bpf_tool{
         std::condition_variable retry_cv_;
         std::mutex retry_cv_mutex_;
         ApplyRequestQueue apply_requests_;
+        bool loader_restart_requested_ = false;
+        TimePoint loader_restart_time_{};
         bool is_valid_ = false; // initialize가 성공했는지 여부.
 
         BpfAttachManager();
@@ -100,6 +102,10 @@ namespace bpf_tool{
 
         void attacher_policy_change_process(int id);
         void append_apply_request(ApplyRequest request);
+        bool start_interface_monitor();
+        void interface_change_process(nic_check::InterfaceLoader::SnapshotPtr snaps);
+        void interface_monitor_failure_process(nic_check::InterfaceError error);
+        void request_interface_monitor_restart();
 
         bool apply_targets_policy_per_attacher(ApplyRequest request);
         FilterQueryResult query_filter(const std::string& nic_name, BpfProgramPtr prog, AttachSpec spec);

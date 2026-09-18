@@ -60,6 +60,7 @@ namespace nic_check {
         kNetlinkOverrunError,
         kWakeFdError,
         kPollError,
+        kMonitorThreadError,
     };
 
     inline constexpr std::string_view interface_loader_error_string(InterfaceError error_code){
@@ -92,6 +93,8 @@ namespace nic_check {
             return "Failed creating the monitor wake-up eventfd";
         case InterfaceError::kPollError:
             return "Failed polling the monitor descriptors";
+        case InterfaceError::kMonitorThreadError:
+            return "Failed starting the interface monitor thread";
         default:
             return "Unknown error code";
         }
@@ -115,6 +118,8 @@ namespace nic_check {
         using SnapshotPtr = std::shared_ptr<const InterfaceMap>;
         // 변경 통지. 항상 락 밖에서 호출하므로 안에서 loader 를 다시 불러도 안전하다.
         using ChangeHandler = std::function<void(SnapshotPtr)>;
+        // 감시 스레드가 비정상 종료됐을 때만 호출한다. 설정하지 않으면 통지하지 않는다.
+        using FailureHandler = std::function<void(InterfaceError)>;
 
         // netlink 는 한 번의 논리적 변경에도 이벤트를 여러 개 보낸다
         // (ip link set up -> NEWLINK x2 + NEWADDR ...). 이만큼 조용해진 뒤 한 번만 refresh 한다.
@@ -130,11 +135,11 @@ namespace nic_check {
         InterfaceLoader& operator=(InterfaceLoader&&) = delete;
 
         // 스레드 계약: 조회 함수와 request_refresh() 는 아무 스레드에서나 호출해도
-        // 되지만, start_monitor()/stop_monitor() 는 한 스레드에서만 호출한다
+        // 되지만, start_monitor()/stop_monitor() 는 동시에 호출하지 않는다
         // (내부 fd 와 jthread 를 교체하므로).
 
-        // netlink 감시 시작. on_change 는 refresh 가 끝날 때마다 락 밖에서 호출된다.
-        bool start_monitor(ChangeHandler on_change = {});
+        // netlink 감시 시작. 콜백은 락 밖에서 호출되며 생략할 수 있다.
+        bool start_monitor(ChangeHandler on_change = {}, FailureHandler on_failure = {});
         void stop_monitor();
         bool is_monitoring() const;
 
@@ -156,7 +161,8 @@ namespace nic_check {
             kStopped = 0,
             kStopping = 1,
             kRunning = 2,
-            kStarting = 3
+            kStarting = 3,
+            kFailed = 4
         };
 
         SnapshotPtr interfaces_;
@@ -165,6 +171,7 @@ namespace nic_check {
         mutable std::mutex last_error_mutex_;
         std::mutex refresh_mutex_;
         ChangeHandler on_change_;
+        FailureHandler on_failure_;
         mutable std::mutex handler_mutex_;
         mutable std::mutex fd_mutex_;
 
@@ -189,6 +196,7 @@ namespace nic_check {
         void drain_wake();
         void wake_monitor();
         void notify_change(const SnapshotPtr& current);
+        void notify_failure(InterfaceError error);
 
         void set_last_error(InterfaceError error) const;
         std::string mac_to_string(const std::uint8_t mac[6]) const ;
