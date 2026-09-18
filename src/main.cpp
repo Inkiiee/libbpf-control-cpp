@@ -131,7 +131,7 @@ int main(){
     sigaddset(&termination_signals, SIGTERM);
     const int mask_error = pthread_sigmask(SIG_BLOCK, &termination_signals, nullptr);
     if(mask_error != 0){
-        error_code ec(-mask_error, generic_category());
+        error_code ec(mask_error, generic_category());
         utils::log("signals block failed: " + ec.message());
         return mask_error;
     }
