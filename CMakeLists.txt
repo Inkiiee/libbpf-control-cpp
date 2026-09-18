@@ -10,6 +10,9 @@ else()
     set(SDKTARGETSYSROOT "" CACHE PATH "Yocto SDK target sysroot path")
 endif()
 
+# BPF 예제는 clang 의 BPF 타겟을 요구한다. 유저스페이스 코드만 빌드하려면 OFF.
+option(BUILD_BPF_EXAMPLE "Build the example TC BPF object (requires clang with BPF target support)" ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -65,4 +68,6 @@ if(SDKTARGETSYSROOT)
     )
 endif()
 
-add_subdirectory(tc_bpf)
+if(BUILD_BPF_EXAMPLE)
+    add_subdirectory(tc_bpf)
+endif()

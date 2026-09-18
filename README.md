@@ -359,6 +359,8 @@ cmake --build build -j
 
 The current CMake configuration builds the userspace example together with the sample TC BPF object.
 
+The sample BPF object requires `clang` with BPF target support. When clang is unavailable it is skipped with a warning and only the userspace code is built; configure with `-DBUILD_BPF_EXAMPLE=OFF` to disable it explicitly.
+
 ## Yocto / Cross Compilation
 
 The build supports the `SDKTARGETSYSROOT` environment variable commonly provided by Yocto SDK environments.
