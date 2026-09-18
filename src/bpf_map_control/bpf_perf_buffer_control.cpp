@@ -35,9 +35,10 @@ BpfControlErrorCode BpfPerfBufferControl::open(bool is_pinned, const string& pin
         if(fd_ < 0)
             return BpfControlErrorCode::kOpenError; // Failed to open the pinned map
 
-        if(!load_map_info()){
+        const BpfControlErrorCode info_error = load_map_info();
+        if(info_error != BpfControlErrorCode::kNoError){
             close();
-            return BpfControlErrorCode::kOpenError;
+            return info_error;
         }
 
         this->pin_path_ = pin_path; // Store the pin path
@@ -106,16 +107,21 @@ BpfControlErrorCode BpfPerfBufferControl::close(){
     return BpfBase::close(); // Call the base class close method
 }
 
-bool BpfPerfBufferControl::load_map_info(){
-    if(!is_open()) return false;
+BpfControlErrorCode BpfPerfBufferControl::load_map_info(){
+    if(!is_open()) return BpfControlErrorCode::kNotOpenedError;
 
     bpf_map_info info{};
     std::uint32_t info_len = sizeof(info);
     int rc = bpf_obj_get_info_by_fd(fd_, &info, &info_len);
-    if(rc < 0) return false;
+    if(rc < 0) return BpfControlErrorCode::kOpenError;
 
-    if(info.type != BPF_MAP_TYPE_PERF_EVENT_ARRAY) return false;
+    if(info.type != BPF_MAP_TYPE_PERF_EVENT_ARRAY){
+        utils::log("pinned object is not a perf event array map");
+        return BpfControlErrorCode::kPinnedMapMismatchError;
+    }
 
-    name_ = info.name; //PERF ARRAY MAP의 경우, page count 복원이 안된다.
-    return true;
+    // page_count_ 는 커널에서 복원할 수 없다. perf array 의 max_entries 는
+    // 페이지 수가 아니라 CPU 수라서 대조 대상이 아니다.
+    name_ = info.name;
+    return BpfControlErrorCode::kNoError;
 }

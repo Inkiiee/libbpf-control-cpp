@@ -35,9 +35,10 @@ BpfControlErrorCode BpfRingBufferControl::open(bool is_pinned, const string& pin
         if(fd_ < 0)
             return BpfControlErrorCode::kOpenError; // Failed to open the pinned map
 
-        if(!load_map_info()){
+        const BpfControlErrorCode info_error = load_map_info();
+        if(info_error != BpfControlErrorCode::kNoError){
             close();
-            return BpfControlErrorCode::kOpenError;
+            return info_error;
         }
 
         this->pin_path_ = pin_path; // Store the pin path
@@ -102,17 +103,28 @@ BpfControlErrorCode BpfRingBufferControl::close(){
     return BpfBase::close(); // Call the base class close method
 }
 
-bool BpfRingBufferControl::load_map_info(){
-    if(!is_open()) return false;
+// 핀에 있는 ring buffer 가 생성자로 요청한 형태와 같은지 확인한다.
+// 커널 값으로 덮어쓰지 않는 이유는 BpfMapControl::load_map_info 참고.
+BpfControlErrorCode BpfRingBufferControl::load_map_info(){
+    if(!is_open()) return BpfControlErrorCode::kNotOpenedError;
 
     bpf_map_info info{};
     std::uint32_t info_len = sizeof(info);
     int rc = bpf_obj_get_info_by_fd(fd_, &info, &info_len);
-    if(rc < 0) return false;
+    if(rc < 0) return BpfControlErrorCode::kOpenError;
 
-    if(info.type != BPF_MAP_TYPE_RINGBUF) return false;
+    if(info.type != BPF_MAP_TYPE_RINGBUF){
+        utils::log("pinned object is not a ring buffer map");
+        return BpfControlErrorCode::kPinnedMapMismatchError;
+    }
+
+    // ring buffer 는 max_entries 가 바이트 단위 버퍼 크기다.
+    if(buf_size_ != info.max_entries){
+        utils::log("pinned ring buffer size mismatch: requested=" + to_string(buf_size_) +
+                   " pinned=" + to_string(info.max_entries));
+        return BpfControlErrorCode::kPinnedMapMismatchError;
+    }
 
     name_ = info.name;
-    buf_size_ = info.max_entries;
-    return true;
+    return BpfControlErrorCode::kNoError;
 }
