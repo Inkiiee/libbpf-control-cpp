@@ -24,6 +24,7 @@ namespace bpf_control{
         BpfRingBufferControl(BpfRingBufferControl&&) = default;
         BpfRingBufferControl& operator=(BpfRingBufferControl&&) = default;
         BpfRingBufferControl(const std::string& name, std::size_t buf_size=1024*64u, void* ctx=nullptr);
+        ~BpfRingBufferControl() override;
 
         // 기본적으로 bpf map과는 open과정이 조금 다름.
         virtual BpfControlErrorCode open(bool is_pinned = false, const std::string& pin_path = "") override;

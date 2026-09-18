@@ -11,6 +11,8 @@ Class Name   : bpf_map_control.cpp
 #include <cerrno>
 #include <vector>
 
+#include "bpf_runtime/bpf_runtime.hpp"
+
 using namespace bpf_control;
 using namespace std;
 namespace fs = std::filesystem;
@@ -19,6 +21,9 @@ BpfMapControl::BpfMapControl(const string& name, size_t key_sz, size_t value_sz,
     : BpfBase(name, ""), key_size_(key_sz), value_size_(value_sz), max_entries_(max_ent), map_type_(map_type){}
 
 BpfControlErrorCode BpfMapControl::open(bool is_pinned, const string& pin_path){
+    if(bpf_runtime::initialize() < 0)
+        return BpfControlErrorCode::kBpfRuntimeInitError;
+
     if(is_open())
         return BpfControlErrorCode::kAlreadyOpenedError; // Map is already open
 
@@ -26,7 +31,7 @@ BpfControlErrorCode BpfMapControl::open(bool is_pinned, const string& pin_path){
         error_code ignored_ec;
         if(!fs::exists(pin_path, ignored_ec)){
             fd_ = -1; // Reset fd_ to indicate failure
-            return BpfControlErrorCode::kNotOpenedError; // Map is not pinned
+            return BpfControlErrorCode::kNotPinnedError; // Map is not pinned
         }
 
         fd_ = bpf_obj_get(pin_path.c_str()); // Open the pinned BPF map

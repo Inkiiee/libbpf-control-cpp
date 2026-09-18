@@ -8,6 +8,8 @@ Class Name   : bpf_perf_buffer_control.cpp
 
 #include "bpf_perf_buffer_control.h"
 
+#include "bpf_runtime/bpf_runtime.hpp"
+
 using namespace bpf_control;
 using namespace std;
 namespace fs = std::filesystem;
@@ -15,12 +17,18 @@ namespace fs = std::filesystem;
 BpfPerfBufferControl::BpfPerfBufferControl(const string& name, int page_count, void* ctx)
     : BpfBase(name, ""), page_count_(page_count), perf_buf_ctx_(ctx) {}
 
+BpfPerfBufferControl::~BpfPerfBufferControl() { perfbuf_.reset(); }
+
 BpfControlErrorCode BpfPerfBufferControl::open(bool is_pinned, const string& pin_path){
+    if(bpf_runtime::initialize() < 0)
+        return BpfControlErrorCode::kBpfRuntimeInitError;
+
     if(is_open())
         return BpfControlErrorCode::kAlreadyOpenedError; // Map is already open
 
     if(is_pinned){
-        if(!fs::exists(pin_path))
+        error_code ignored_ec;
+        if(!fs::exists(pin_path, ignored_ec))
             return BpfControlErrorCode::kNotPinnedError; // Map is not pinned
 
         fd_ = bpf_obj_get(pin_path.c_str()); // Open the pinned BPF map
@@ -35,7 +43,7 @@ BpfControlErrorCode BpfPerfBufferControl::open(bool is_pinned, const string& pin
         this->pin_path_ = pin_path; // Store the pin path
     }
     else{
-        const long cpu_count = ::sysconf(_SC_NPROCESSORS_ONLN);
+        const int cpu_count = libbpf_num_possible_cpus();
         if(cpu_count <= 0)
             return BpfControlErrorCode::kPerfFailedToGetCpuCountError; // Failed to get the number of CPUs
         
@@ -49,8 +57,10 @@ BpfControlErrorCode BpfPerfBufferControl::open(bool is_pinned, const string& pin
                             sizeof(uint32_t),
                             static_cast<uint32_t>(cpu_count),
                             &opts);
-        if(fd_ < 0)
-            return BpfControlErrorCode::kNotOpenedError; // Failed to create the perf buffer map
+        if(fd_ < 0){
+            fd_ = -1;
+            return BpfControlErrorCode::kOpenError; // Failed to create the perf buffer map
+        }
     }
 
     return BpfControlErrorCode::kNoError;

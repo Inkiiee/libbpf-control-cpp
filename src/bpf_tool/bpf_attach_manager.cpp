@@ -11,6 +11,7 @@
 
 #include "nic_check/interface_loader.h"
 #include "utils/logger.hpp"
+#include "bpf_runtime/bpf_runtime.hpp"
 
 using namespace std;
 using namespace bpf_tool;
@@ -24,6 +25,13 @@ namespace {
 }
 
 BpfAttachManager::BpfAttachManager(){
+    if(bpf_runtime::initialize() < 0){
+        utils::log("bpf runtime initialize failed");
+        is_valid_ = false;
+        return;
+    }
+
+    is_valid_ = true;
     retry_thread_ = jthread([this](std::stop_token stop){
         while(!stop.stop_requested()){
             ApplyRequestQueue ready;
@@ -69,7 +77,7 @@ BpfAttachManager::BpfAttachManager(){
         }
     });
 
-    loader_.start_monitor([this](InterfaceLoader::SnapshotPtr snaps){
+    bool success = loader_.start_monitor([this](InterfaceLoader::SnapshotPtr snaps){
         (void)snaps;
 
         int count;
@@ -80,10 +88,19 @@ BpfAttachManager::BpfAttachManager(){
         for(int i=0; i<count; i++)
             append_apply_request(ApplyRequest(i, true));
     });
+    if(!success){
+        is_valid_ = false;
+        if(retry_thread_.joinable()){
+            retry_thread_.request_stop();
+            retry_cv_.notify_all();
+            retry_thread_.join();
+        }
+    }
 }
 BpfAttachManager::~BpfAttachManager(){
-    loader_.stop_monitor();
+    if(!is_valid_) return;
 
+    loader_.stop_monitor();
     if(retry_thread_.joinable()){
         retry_thread_.request_stop();
         retry_cv_.notify_all();
@@ -216,6 +233,7 @@ bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog,
     opts.handle   = spec.handle;
     opts.priority = spec.priority;
     opts.flags    = query.state == FilterState::kOtherProgram ? BPF_TC_F_REPLACE : 0;
+
     rc = bpf_tc_attach(&hook, &opts);
     return rc == 0;
 }

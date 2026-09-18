@@ -27,6 +27,7 @@ namespace bpf_control{
         BpfPerfBufferControl(BpfPerfBufferControl&&) = default;
         BpfPerfBufferControl& operator=(BpfPerfBufferControl&&) = default;
         BpfPerfBufferControl(const std::string& name, int page_count=8, void* ctx=nullptr);
+        ~BpfPerfBufferControl() override;
 
         // 기본적으로 bpf map과는 open과정이 조금 다름.
         virtual BpfControlErrorCode open(bool is_pinned = false, const std::string& pin_path = "") override;

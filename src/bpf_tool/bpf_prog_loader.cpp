@@ -1,5 +1,4 @@
 #include "bpf_tool/bpf_prog_loader.h"
-#include "utils/logger.hpp"
 
 #include <cerrno>
 #include <filesystem>
@@ -13,6 +12,9 @@
 #include <linux/bpf.h>
 #include <unistd.h>
 
+#include "utils/logger.hpp"
+#include "bpf_runtime/bpf_runtime.hpp"
+
 using namespace std;
 using namespace bpf_control;
 using namespace bpf_tool;
@@ -20,12 +22,6 @@ using namespace utils;
 namespace fs = std::filesystem;
 
 namespace{
-    struct PinProgResult{
-        string pinned_path;
-        bool is_owner;
-        BpfProgLoaderError error;
-    };
-
     bool is_exists_file(const fs::path& file_path) noexcept {
         error_code err_code;
         if(fs::exists(file_path, err_code))
@@ -35,16 +31,6 @@ namespace{
             utils::log("file exists check error: " + err_code.message());
 
         return false;
-    }
-
-    bool make_directory_if_not_exist(const fs::path& dir_path) noexcept {
-        error_code ec;
-        fs::create_directories(dir_path, ec);
-        if(ec){
-            utils::log("create directory " + dir_path.string() + " failed: " + ec.message());
-            return false;
-        }
-        return true;
     }
 
     bool is_correct_bpf_prog_type(int type){
@@ -103,29 +89,28 @@ namespace{
         return prog;
     }
     // bpf 프로그램이 사용하는 맵과 C++에서 랩퍼로 연 bpf 맵을 묶는다.
-    BpfProgLoaderError reuse_bpf_map_in_prog(shared_ptr<bpf_object> obj_ptr, const vector<BpfBase*>& pinned_maps){
-        for(auto pinned_map: pinned_maps){
+    BpfProgLoaderError reuse_bpf_map_in_prog(shared_ptr<bpf_object> obj_ptr, const vector<BpfBase*>& bpf_maps){
+        for(auto bpf: bpf_maps){
             // bpf 프로그램의 빌드 파일(.o 파일)에서 bpf map의 정보를 가져온다.
-            bpf_map* map = bpf_object__find_map_by_name(obj_ptr.get(), pinned_map->get_name().c_str());
+            bpf_map* map = bpf_object__find_map_by_name(obj_ptr.get(), bpf->get_name().c_str());
             if(!map){
                 error_code ec1(ENOENT, std::generic_category());
-                utils::log("bpf_object__find_map_by_name(map name: " + pinned_map->get_name() + "): " + ec1.message());
+                utils::log("bpf_object__find_map_by_name(map name: " + bpf->get_name() + "): " + ec1.message());
                 return BpfProgLoaderError::kProgDontUseTheBpfMapError;
             }
 
-            // 실제로 reuse할 맵이 pinned 되어있는지 확인한다.
-            fs::path pinned_map_path = pinned_map->get_pin_path();
-            if(!is_exists_file(pinned_map_path)){
-                utils::log(pinned_map_path.string() + " is not exists");
-                return BpfProgLoaderError::kInvalidBpfMapPinPathError;
+            // 실제로 reuse할 맵이 open되어있는지 확인한다.
+            if(!bpf->is_open()){
+                utils::log(bpf->get_name() + " is not open");
+                return BpfProgLoaderError::kReuseMapError;
             }
 
             // 모든 조건을 충족하면 bpf 프로그램의 bpf map과 사용자의 wrapper를 연결한다.
-            const int rc = bpf_map__reuse_fd(map, pinned_map->get_fd());
+            const int rc = bpf_map__reuse_fd(map, bpf->get_fd());
             if(rc < 0){
                 error_code ec2(-rc, std::generic_category());
-                utils::log("bpf_map__reuse_fd(map name: " + pinned_map->get_name() + "): " + ec2.message());
-                return BpfProgLoaderError::kBpfProgFailedPinnedMapLoad;
+                utils::log("bpf_map__reuse_fd(map name: " + bpf->get_name() + "): " + ec2.message());
+                return BpfProgLoaderError::kBpfProgFailedMapLoad;
             }
         }
         return BpfProgLoaderError::kNoError;
@@ -139,28 +124,6 @@ namespace{
             return BpfProgLoaderError::kUploadProgToKernelError;
         }
         return BpfProgLoaderError::kNoError;
-    }
-    // 업로드된 bpf 프로그램을 pin한다. 기존 핀은 다른 프로그램을 가리킬 수 있으므로 덮어쓰거나 재사용하지 않는다.
-    PinProgResult pin_prog(bpf_program* prog, const string& function_name, const string& pin_dir){
-        fs::path pinned_prog_path = fs::path(pin_dir) / fs::path(function_name);
-        if(is_exists_file(pinned_prog_path)){
-            utils::log("already exists the pin file: " + pinned_prog_path.string());
-            return {"", false, BpfProgLoaderError::kProgPinPathAlreadyExists};
-        }
-
-        if(!make_directory_if_not_exist(fs::path(pin_dir)))
-            return {"", false, BpfProgLoaderError::kProgPinError};
-
-        int rc = bpf_program__pin(prog, pinned_prog_path.c_str());
-        if(rc < 0){
-            if(rc == -EEXIST)
-                return {"", false, BpfProgLoaderError::kProgPinPathAlreadyExists};
-
-            error_code ec(-rc, std::generic_category());
-            utils::log("bpf_program__pin: " + ec.message());
-            return {"", false, BpfProgLoaderError::kProgPinError};
-        }
-        return {pinned_prog_path.string(), true, BpfProgLoaderError::kNoError};
     }
 
     int get_bpf_prog_fd(bpf_program* prog){
@@ -191,8 +154,12 @@ namespace{
 }
 
 BpfProgLoader::BpfProgramPtrAndError BpfProgLoader::load_program(
-    const string& prog_obj_path, const string& function_name, const vector<BpfBase*>& pinned_maps, const string& pin_dir, int type)
+    const string& prog_obj_path, const string& function_name, const vector<BpfBase*>& bpf_maps, int type)
 {
+    if(bpf_runtime::initialize() < 0){
+        return {nullptr, BpfProgLoaderError::kBpfRuntimeInitError};
+    }
+
     auto obj_ptr = load_bpf_object(prog_obj_path);
     if(!obj_ptr)
         return {nullptr, BpfProgLoaderError::kLoadProgObjectError};
@@ -201,7 +168,7 @@ BpfProgLoader::BpfProgramPtrAndError BpfProgLoader::load_program(
     if(!prog)
         return  {nullptr, BpfProgLoaderError::kSetProgTypeError};
 
-    BpfProgLoaderError reuse_map_error = reuse_bpf_map_in_prog(obj_ptr, pinned_maps);
+    BpfProgLoaderError reuse_map_error = reuse_bpf_map_in_prog(obj_ptr, bpf_maps);
     if(reuse_map_error != BpfProgLoaderError::kNoError)
         return {nullptr, reuse_map_error};
 
@@ -219,17 +186,9 @@ BpfProgLoader::BpfProgramPtrAndError BpfProgLoader::load_program(
         return {nullptr, BpfProgLoaderError::kGetProgIdError};
     }
 
-    auto pin_result = pin_prog(prog, function_name, pin_dir);
-    if(pin_result.error != BpfProgLoaderError::kNoError){
-        ::close(prog_fd);
-        return {nullptr, pin_result.error};
-    }
-
     BpfProgramPtr program_handle = make_shared<BpfProgram>();
     program_handle->fd = prog_fd;
     program_handle->function_name = function_name;
-    program_handle->is_pin_owner = pin_result.is_owner;
-    program_handle->pinned_path = move(pin_result.pinned_path);
     program_handle->prog_id = prog_id;
     program_handle->type = type;
     const char* section_name = bpf_program__section_name(prog);

@@ -66,6 +66,8 @@ namespace bpf_tool{
         }
 
         AttacherPtr create_attacher(BpfProgramPtr prog, AttachSpec spec){
+            if(!is_valid_) return nullptr;
+            
             std::lock_guard<std::mutex> lock(attacher_mutex_);
             auto attacher = std::make_shared<Attacher>(prog, spec, attachers_.size(), [this](int id){attacher_policy_change_process(id);});
             attachers_.push_back(attacher);
@@ -91,6 +93,7 @@ namespace bpf_tool{
         std::condition_variable retry_cv_;
         std::mutex retry_cv_mutex_;
         ApplyRequestQueue apply_requests_;
+        bool is_valid_ = false; // initialize가 성공했는지 여부.
 
         BpfAttachManager();
         ~BpfAttachManager();

@@ -2,35 +2,26 @@
 #define BPF_TYPES_HPP
 
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <string>
-#include <system_error>
 #include <unistd.h>
 
 namespace bpf_tool{
     struct BpfProgram{
         std::uint32_t prog_id{0};
-        bool is_pin_owner{false};
         int type;
         int fd;
         std::string function_name;
-        std::string pinned_path;
         std::string section_name;
 
         BpfProgram(BpfProgram&&) = delete;
         BpfProgram& operator=(BpfProgram&&) = delete;
         BpfProgram(const BpfProgram&) = delete;
         BpfProgram& operator=(const BpfProgram&) = delete;
-        BpfProgram():prog_id{0}, is_pin_owner{false}, type{-1}, fd{-1}{}
+        BpfProgram():prog_id{0}, type{-1}, fd{-1}{}
 
         ~BpfProgram(){
             if(fd >= 0) ::close(fd);
-
-            if(!is_pin_owner) return;
-            std::error_code ignore_ec;
-            std::filesystem::path path(pinned_path);
-            std::filesystem::remove(path, ignore_ec);
         }
     };
 

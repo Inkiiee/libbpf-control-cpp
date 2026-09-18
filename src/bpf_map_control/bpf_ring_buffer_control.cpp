@@ -8,6 +8,8 @@ Class Name   : bpf_ring_buffer_control.cpp
 
 #include "bpf_ring_buffer_control.h"
 
+#include "bpf_runtime/bpf_runtime.hpp"
+
 using namespace bpf_control;
 using namespace std;
 namespace fs = std::filesystem;
@@ -15,12 +17,18 @@ namespace fs = std::filesystem;
 BpfRingBufferControl::BpfRingBufferControl(const string& name, size_t buf_size, void* ctx)
     : BpfBase(name, ""), buf_size_(buf_size), ringbuf_ctx_(ctx) {}
 
+BpfRingBufferControl::~BpfRingBufferControl() { ringbuf_.reset(); }
+
 BpfControlErrorCode BpfRingBufferControl::open(bool is_pinned, const string& pin_path){
+    if(bpf_runtime::initialize() < 0)
+        return BpfControlErrorCode::kBpfRuntimeInitError;
+
     if(is_open())
         return BpfControlErrorCode::kAlreadyOpenedError; // Map is already open
 
     if(is_pinned){
-        if(!fs::exists(pin_path))
+        error_code ignored_ec;
+        if(!fs::exists(pin_path, ignored_ec))
             return BpfControlErrorCode::kNotPinnedError; // Map is not pinned
 
         fd_ = bpf_obj_get(pin_path.c_str()); // Open the pinned BPF map
@@ -45,8 +53,10 @@ BpfControlErrorCode BpfRingBufferControl::open(bool is_pinned, const string& pin
                             0,              // value_size (ringbuf은 0)
                             static_cast<uint32_t>(buf_size_),
                             &opts);
-        if(fd_ < 0)
+        if(fd_ < 0){
+            fd_ = -1;
             return BpfControlErrorCode::kOpenError; // Failed to create the ring buffer map
+        }
     }
 
     return BpfControlErrorCode::kNoError;

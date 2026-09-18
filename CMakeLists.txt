@@ -25,7 +25,6 @@ set(SRCS
     src/bpf_map_control/bpf_ring_buffer_control.cpp
     src/bpf_map_control/bpf_perf_buffer_control.cpp
     src/nic_check/interface_loader.cpp
-    src/utils/safe_command.cpp
     src/bpf_tool/bpf_attach_manager.cpp
     src/bpf_tool/bpf_attacher.cpp
     src/bpf_tool/bpf_prog_loader.cpp
@@ -46,13 +45,8 @@ target_include_directories(bpf_control PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_map_control
 )
-target_include_directories(bpf_control SYSTEM PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio_1.38.0/include
-)
 
 target_compile_definitions(bpf_control PRIVATE
-    ASIO_STANDALONE
     _GLIBCXX_ASSERTIONS
 )
 
