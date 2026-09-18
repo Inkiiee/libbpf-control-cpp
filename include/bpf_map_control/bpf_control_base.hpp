@@ -159,8 +159,10 @@ namespace bpf_control {
         virtual BpfControlErrorCode close(){
             if(!is_open()) return BpfControlErrorCode::kNotOpenedError;
 
-            if(::close(fd_) < 0) 
-                return BpfControlErrorCode::kCloseError;
+            BpfControlErrorCode error = BpfControlErrorCode::kNoError;
+            if(::close(fd_) < 0)  // Linux에서 ::close()는 반환값과 무관하게 fd를 항상 해제합니다. (중요.)
+                error = BpfControlErrorCode::kCloseError;
+                
             
             // close는 기본적으로 소유권을 버리는 행위로 봄.
             // Map은 기본적으로는 pin된 맵을 정리하지 않음.
@@ -169,7 +171,7 @@ namespace bpf_control {
             is_pin_owner_ = false;
             pin_path_.clear();
             fd_ = -1;
-            return BpfControlErrorCode::kNoError;
+            return error;
         }
         BpfControlErrorCode unpin(){
             if(!is_open()) return BpfControlErrorCode::kNotOpenedError;
