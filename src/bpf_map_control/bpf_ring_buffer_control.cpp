@@ -70,14 +70,12 @@ BpfControlErrorCode BpfRingBufferControl::event_buffer_create(){
     // sample_cb_는 커널에서 이벤트가 발생했을 때 호출되는 콜백함수임.
     // ring buffer는 모든 cpu가 공유하는 링 형태의 큐를 만드는 것이라서, 이벤트 순서가 보장되고, 이벤트를 놓치지 않음.
     if(!sample_cb_){
-        close(); // Close the map if callback is not set
         return BpfControlErrorCode::kCallbackNotSetError; // Callback must be set before opening the ring buffer
     }
 
     // RAII로 관리되며, ring_buffer__free를 사용하여 자동으로 해제됨.
     ringbuf_.reset(ring_buffer__new(fd_, sample_cb_, ringbuf_ctx_, nullptr));
     if(!ringbuf_){
-        close(); // Close the map if ring buffer creation fails
         return BpfControlErrorCode::kBufferMakeError; // Failed to create the ring buffer
     }
 
