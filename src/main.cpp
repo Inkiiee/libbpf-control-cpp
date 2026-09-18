@@ -178,6 +178,10 @@ int main(){
         .handle = 1,
         .is_ingress = true
     });
+    if(!attacher){
+        utils::log("Attacher create failed");
+        return -1;
+    }
 
     attacher->add_target("eth0");
     attacher->add_target("eth3");
@@ -187,6 +191,7 @@ int main(){
         BpfRingBufferControl::ring_buffer_sample_callback 
             monitor_cb=[](void *ctx, void *data, size_t size) -> int
         {
+            (void)ctx;
             if(size < sizeof(monitor_event)){
                 utils::log("MOnitor error, received event size is too small");
                 return -1;
