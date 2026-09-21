@@ -78,7 +78,8 @@ namespace bpf_tool{
         enum class FilterState{
             kOurProgram,
             kOtherProgram,
-            kNotFound,
+            kNotFound,  // clsact 는 있으나 해당 handle/priority 필터가 없음
+            kNoHook,    // clsact qdisc 자체가 없음. 따라서 붙어 있을 수도 없음
             kError
         };
         struct FilterQueryResult{

@@ -237,6 +237,12 @@ BpfAttachManager::FilterQueryResult BpfAttachManager::query_filter(
     int rc = bpf_tc_query(&hook, &query);
     if(rc == -ENOENT)
         return {FilterState::kNotFound, 0};
+    // clsact qdisc 가 없으면 커널이 "Parent Qdisc doesn't exists" 로 -EINVAL 을 준다.
+    // 이건 오류가 아니라 "아직 붙을 자리가 없다" 는 정상 상태다. 오류로 취급하면
+    // attach 는 qdisc 를 만들기도 전에 포기하고, detach 는 원래 비어 있던 NIC 를
+    // 실패로 보고한다.
+    if(rc == -EINVAL)
+        return {FilterState::kNoHook, 0};
     if(rc != 0)
         return {FilterState::kError, rc};
     if(query.prog_id == prog->prog_id)
@@ -245,15 +251,6 @@ BpfAttachManager::FilterQueryResult BpfAttachManager::query_filter(
 }
 
 bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog, AttachSpec spec){
-    const auto query = query_filter(nic_name, prog, spec);
-    if(query.state == FilterState::kOurProgram)
-        return true;
-    if(query.state == FilterState::kError){
-        error_code ec(-query.error, std::generic_category());
-        utils::log("bpf_tc_query failed while attaching " + nic_name + ": " + ec.message());
-        return false;
-    }
-
     int ifindex = loader_.get_ifindex_by_ifname(nic_name);
     if(ifindex <= 0)
         return false;
@@ -263,9 +260,24 @@ bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog,
     hook.ifindex      = ifindex;
     hook.attach_point = spec.is_ingress ? BPF_TC_INGRESS : BPF_TC_EGRESS;
 
+    // clsact 를 먼저 확보한다. bpf_tc_query 는 부모 qdisc 가 없으면 실패하므로,
+    // 조회를 앞에 두면 qdisc 가 없는 인터페이스에는 영영 붙일 수 없다.
+    // hook_create 는 멱등이다(-EEXIST 는 이미 있다는 뜻).
     int rc = bpf_tc_hook_create(&hook);
-    if(rc && rc != -EEXIST)
+    if(rc && rc != -EEXIST){
+        error_code ec(-rc, std::generic_category());
+        utils::log("bpf_tc_hook_create failed on " + nic_name + ": " + ec.message());
         return false;
+    }
+
+    const auto query = query_filter(nic_name, prog, spec);
+    if(query.state == FilterState::kOurProgram)
+        return true;
+    if(query.state == FilterState::kError){
+        error_code ec(-query.error, std::generic_category());
+        utils::log("bpf_tc_query failed while attaching " + nic_name + ": " + ec.message());
+        return false;
+    }
 
     struct bpf_tc_opts opts = {};
     opts.sz       = sizeof(opts);
@@ -275,7 +287,12 @@ bool BpfAttachManager::attach_filter(const string& nic_name, BpfProgramPtr prog,
     opts.flags    = query.state == FilterState::kOtherProgram ? BPF_TC_F_REPLACE : 0;
 
     rc = bpf_tc_attach(&hook, &opts);
-    return rc == 0;
+    if(rc != 0){
+        error_code ec(-rc, std::generic_category());
+        utils::log("bpf_tc_attach failed on " + nic_name + ": " + ec.message());
+        return false;
+    }
+    return true;
 }
 
 bool BpfAttachManager::detach_filter(const string& nic_name, BpfProgramPtr prog, AttachSpec spec){
@@ -303,5 +320,10 @@ bool BpfAttachManager::detach_filter(const string& nic_name, BpfProgramPtr prog,
     opts.priority = spec.priority;
 
     int rc = bpf_tc_detach(&hook, &opts);
-    return rc == 0 || rc == -ENOENT;
+    if(rc != 0 && rc != -ENOENT){
+        error_code ec(-rc, std::generic_category());
+        utils::log("bpf_tc_detach failed on " + nic_name + ": " + ec.message());
+        return false;
+    }
+    return true;
 }
