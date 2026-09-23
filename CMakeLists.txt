@@ -22,8 +22,7 @@ project(bpf_control C CXX)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-set(SRCS
-    src/main.cpp
+set(BPF_CONTROL_CORE_SRCS
     src/bpf_map_control/bpf_map_control.cpp
     src/bpf_map_control/bpf_ring_buffer_control.cpp
     src/bpf_map_control/bpf_perf_buffer_control.cpp
@@ -34,7 +33,46 @@ set(SRCS
     src/utils/termination_signal_waiter.cpp
 )
 
-add_executable(bpf_control ${SRCS})
+add_library(bpf_control_core STATIC ${BPF_CONTROL_CORE_SRCS})
+
+add_library(bpf_control::core ALIAS bpf_control_core)
+
+target_compile_options(bpf_control_core PRIVATE
+    -Wall
+    -Wextra
+    -Wshadow
+    $<$<CONFIG:Release>:-O2>
+)
+
+# 인클루드 경로
+target_include_directories(bpf_control_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_map_control
+)
+
+target_compile_definitions(bpf_control_core PRIVATE
+    _GLIBCXX_ASSERTIONS
+)
+
+target_link_libraries(bpf_control_core PUBLIC
+    bpf
+    Threads::Threads
+)
+
+if(SDKTARGETSYSROOT)
+    target_include_directories(bpf_control_core PUBLIC
+        ${SDKTARGETSYSROOT}/usr/include
+    )
+    target_link_directories(bpf_control_core PUBLIC
+        ${SDKTARGETSYSROOT}/usr/lib
+    )
+endif()
+
+add_executable(bpf_control src/main.cpp)
+
+target_include_directories(bpf_control PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 target_compile_options(bpf_control PRIVATE
     -Wall
@@ -43,29 +81,18 @@ target_compile_options(bpf_control PRIVATE
     $<$<CONFIG:Release>:-O2>
 )
 
-# 인클루드 경로
-target_include_directories(bpf_control PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpf_map_control
-)
-
 target_compile_definitions(bpf_control PRIVATE
     _GLIBCXX_ASSERTIONS
 )
 
 target_link_libraries(bpf_control PRIVATE
-    bpf
-    Threads::Threads
+    bpf_control::core
 )
 
-if(SDKTARGETSYSROOT)
-    target_include_directories(bpf_control PRIVATE
-        ${SDKTARGETSYSROOT}/usr/include
-    )
-    target_link_directories(bpf_control PRIVATE
-        ${SDKTARGETSYSROOT}/usr/lib
-    )
+include(CTest)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()
 
 if(BUILD_BPF_EXAMPLE)
