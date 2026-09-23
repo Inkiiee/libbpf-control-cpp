@@ -1,5 +1,7 @@
 # libbpf-control-cpp
 
+[![CI](https://github.com/Inkiiee/libbpf-control-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Inkiiee/libbpf-control-cpp/actions/workflows/ci.yml)
+
 C++20 utilities for managing **libbpf maps, BPF programs, Linux TC attachments, and dynamic network interfaces**.
 
 The project provides a small C++ layer around recurring eBPF userspace lifecycle problems rather than trying to hide libbpf itself.
@@ -418,6 +420,26 @@ The current CMake configuration builds the userspace example together with the s
 
 The sample BPF object requires `clang` with BPF target support. When clang is unavailable it is skipped with a warning and only the userspace code is built; configure with `-DBUILD_BPF_EXAMPLE=OFF` to disable it explicitly.
 
+## Tests
+
+The unit tests cover the parts that can run deterministically without root privileges or kernel eBPF capabilities:
+
+- `Attacher` policy snapshots, mode changes, and callback behavior
+- `BpfProgram` FD ownership
+- `TerminationSignalWaiter` startup errors, signal delivery, and signal-mask restoration
+
+Build and run them with:
+
+```bash
+cmake -S . -B build \
+    -DBUILD_BPF_EXAMPLE=OFF \
+    -DBUILD_TESTING=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+GitHub Actions runs the same build and test flow on Ubuntu for every push and pull request. Kernel-dependent TC attachment, map pinning, and interface-monitor integration are intentionally excluded from this unprivileged unit-test job.
+
 ## Yocto / Cross Compilation
 
 The build supports the `SDKTARGETSYSROOT` environment variable commonly provided by Yocto SDK environments.
@@ -462,7 +484,7 @@ Current limitations include:
 - initial interface-monitor startup failure makes `BpfAttachManager` unavailable; automatic monitor restart applies only after a successful initial start
 - an existing TC program at the same handle / priority may be replaced during reconciliation
 - multiple attachers using the same interface, direction, handle, and priority are not conflict-resolved automatically
-- the repository currently builds an example executable rather than exposing a packaged installable CMake library target
+- the repository exposes a build-tree `bpf_control::core` target but does not yet provide install/export packaging
 - `main.cpp` and `tc_bpf/` contain example-specific paths, interfaces, and behavior
 
 ## Design Goals
